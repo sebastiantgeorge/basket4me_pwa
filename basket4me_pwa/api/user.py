@@ -9,7 +9,7 @@ def get_user_profile(user=None):
     user_doc = frappe.get_doc("User", user)
 
     # Get roles
-    roles = frappe.get_roles(user)
+    # roles = frappe.get_roles(user)
 
     # Get accessible doctypes
     doctypes = []
@@ -32,17 +32,8 @@ def get_user_profile(user=None):
         "user": user,
         "full_name": user_doc.full_name,
         "email": user_doc.email,
-        "roles": roles,
+        # "roles": roles,
         "accessible_doctypes": doctypes,
         "api_key": api_key,
         "api_secret": api_secret
     }
-
-@frappe.whitelist()
-def get_customers():
-    customers = frappe.get_all(
-        "Customer",
-        fields=["name", "customer_name", "customer_group"]
-    )
-    
-    return customers
