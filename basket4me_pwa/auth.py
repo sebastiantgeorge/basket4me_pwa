@@ -164,13 +164,20 @@ def get_user_details(sid=None, user_id=None):
         if user_image and not user_image.startswith("http"):
             user_image = frappe.utils.get_url(user_image)
 
-        # Get default company and its logo
-        default_company = frappe.defaults.get_user_default("Company", user_id) or frappe.defaults.get_global_default("company")
+        # Get company from Basket4Me Settings > Sales Person Details
         company_name = None
         company_logo = None
-        if default_company:
-            company_name = default_company
-            company_logo = frappe.db.get_value("Company", default_company, "company_logo")
+        settings = frappe.get_single("Basket4Me Settings")
+        for row in settings.get("sales_person_details", []):
+            if row.sales_person == user_doc.username:
+                company_name = row.company
+                break
+
+        if not company_name:
+            company_name = frappe.defaults.get_user_default("Company", user_id) or frappe.defaults.get_global_default("company")
+
+        if company_name:
+            company_logo = frappe.db.get_value("Company", company_name, "company_logo")
             if company_logo and not company_logo.startswith("http"):
                 company_logo = frappe.utils.get_url(company_logo)
 
