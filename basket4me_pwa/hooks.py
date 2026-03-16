@@ -117,9 +117,11 @@ app_license = "mit"
 # -----------
 # Permissions evaluated in scripted ways
 
-# permission_query_conditions = {
-# 	"Event": "frappe.desk.doctype.event.event.get_permission_query_conditions",
-# }
+permission_query_conditions = {
+	"Sales Invoice": "basket4me_pwa.permission.sales_invoice.get_permission_query_conditions_for_invoice",
+    "Customer": "basket4me_pwa.permission.customer.get_permission_query_conditions_for_customer",
+    "Payment Entry": "basket4me_pwa.permission.customer.get_permission_query_conditions_for_payment_entry",
+}
 #
 # has_permission = {
 # 	"Event": "frappe.desk.doctype.event.event.has_permission",
@@ -137,13 +139,20 @@ app_license = "mit"
 # ---------------
 # Hook on document methods and events
 
-# doc_events = {
-# 	"*": {
-# 		"on_update": "method",
-# 		"on_cancel": "method",
-# 		"on_trash": "method"
-# 	}
-# }
+doc_events = {
+	"Sales Invoice": {
+		"validate": [
+			"basket4me_pwa.events.sales_invoice.calculate_item_discounts",
+			"basket4me_pwa.events.sales_invoice.validate_free_item_rates"
+		],
+		"on_submit":[ "basket4me_pwa.events.sales_invoice.create_delivery_note",
+               "basket4me_pwa.events.sales_invoice.create_payment_entry"],
+		"on_cancel": "basket4me_pwa.events.sales_invoice.cancel_delivery_note"
+	},
+	"Delivery Note": {
+		"validate": "basket4me_pwa.events.sales_invoice.validate_free_item_rates_delivery_note"
+	}
+}
 
 # Scheduled Tasks
 # ---------------
@@ -235,12 +244,47 @@ app_license = "mit"
 # 	"basket4me_pwa.auth.validate"
 # ]
 
+# Whitelisted Methods
+# ------------------
+# Methods accessible via API without authentication
+
+whitelisted_methods = [
+    "basket4me_pwa.api.get_pdf_download_link",
+    "basket4me_pwa.api.direct_print_view",
+    "basket4me_pwa.api.print_document_default",
+    "basket4me_pwa.api.print_document",
+    "basket4me_pwa.api.bulk_print_documents",
+    "basket4me_pwa.api.print_with_filters",
+    "basket4me_pwa.api.print_url_generator",
+    "basket4me_pwa.api.get_available_print_formats",
+    "basket4me_pwa.api.get_print_document_metadata",
+    "basket4me_pwa.api.print_documents_by_date_range",
+    "basket4me_pwa.api.print_documents_by_custom_query",
+    "basket4me_pwa.api.get_document_preview",
+    "basket4me_pwa.api.batch_download_print_documents",
+    "basket4me_pwa.api.get_print_settings",
+    "basket4me_pwa.api.update_print_settings",
+    "basket4me_pwa.api.get_letterhead_details",
+    "basket4me_pwa.api.print_queue_status",
+    "basket4me_pwa.api.cancel_print_job",
+    "basket4me_pwa.api.get_print_history",
+    "basket4me_pwa.api.print_document_with_template",
+    "basket4me_pwa.api.merge_print_documents",
+    "basket4me_pwa.api.schedule_bulk_print",
+    "basket4me_pwa.api.get_bulk_print_status",
+    "basket4me_pwa.api.download_bulk_print_result"
+]
+
 # Automatically update python controller files with type annotations for this app.
 # export_python_type_annotations = True
 
 # default_log_clearing_doctypes = {
 # 	"Logging DocType Name": 30  # days to retain logs
 # }
+
+fixtures =[
+    {"dt":"Custom Field","filters":[["module","in",["Basket4Me PWA"]]]},
+]
 
 # Translation
 # ------------
