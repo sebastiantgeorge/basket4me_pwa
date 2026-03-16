@@ -158,13 +158,33 @@ def get_user_details(sid=None, user_id=None):
 
         # Fetch the user details using user_id
         user_doc = frappe.get_doc("User", user_id)
+
+        # Get user profile image (full URL)
+        user_image = user_doc.user_image
+        if user_image and not user_image.startswith("http"):
+            user_image = frappe.utils.get_url(user_image)
+
+        # Get default company and its logo
+        default_company = frappe.defaults.get_user_default("Company", user_id) or frappe.defaults.get_global_default("company")
+        company_name = None
+        company_logo = None
+        if default_company:
+            company_name = default_company
+            company_logo = frappe.db.get_value("Company", default_company, "company_logo")
+            if company_logo and not company_logo.startswith("http"):
+                company_logo = frappe.utils.get_url(company_logo)
+
         user_data = {
-            "sid": sid if sid else frappe.session.sid,  # Use provided SID or current session's SID
+            "sid": sid if sid else frappe.session.sid,
             "api_key": user_doc.api_key,
             "api_secret": user_doc.get_password('api_secret'),
             "username": user_doc.username,
             "email": user_doc.email,
+            "full_name": user_doc.full_name,
             "mobile_no": user_doc.mobile_no,
+            "user_image": user_image,
+            "company_name": company_name,
+            "company_logo": company_logo,
             "employee_id": frappe.get_value("Employee", {'user_id': user_doc.name}),
         }
 
