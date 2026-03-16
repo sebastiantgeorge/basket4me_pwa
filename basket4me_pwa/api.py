@@ -6265,3 +6265,2067 @@ def get_open_shift():
     except Exception as e:
         return response(str(e), {}, False, 500)
 
+
+# ==================== SALES ORDER APIs ====================
+
+@frappe.whitelist(methods="POST")
+def create_sales_order(params):
+    """
+    Create a Sales Order in Draft mode.
+
+    Args (via params dict):
+        customer: Customer name (required)
+        items: list of {"item_code", "qty", "uom", "rate", "discount_percentage", "discount_amount"} (required)
+        delivery_date: Delivery date (optional, defaults to today)
+        po_no: Purchase Order number (optional)
+        remarks: Remarks (optional)
+        custom_payment_type: Payment type (optional)
+        additional_discount_amount: Overall discount amount (optional)
+    """
+    try:
+        if isinstance(params, str):
+            params = json.loads(params)
+
+        sales_person = frappe.db.get_value("Sales Person", {"custom_user": frappe.session.user}, "name")
+        customer = params.get("customer")
+
+        settings = get_basket4me_settings()
+        sales_person_details = None
+        for detail in settings.sales_person_details:
+            if detail.sales_person == sales_person:
+                sales_person_details = detail
+
+        if not sales_person_details:
+            return response(f"No Basket4Me Settings found for sales person {sales_person}", {}, False, 400)
+
+        effective_price_list = get_effective_price_list(customer=customer, sales_person=sales_person)
+
+        items = params.get("items")
+        delivery_date = params.get("delivery_date") or nowdate()
+        posting_date = params.get("posting_date") or nowdate()
+        payment_type = params.get("custom_payment_type") or params.get("payment_type")
+        additional_discount_amount = flt(params.get("additional_discount_amount") or params.get("discount_amount") or 0)
+
+        if not customer:
+            return response("Customer is required", {}, False, 400)
+        if not items or not isinstance(items, list):
+            return response("At least one item is required", {}, False, 400)
+
+        so = frappe.new_doc("Sales Order")
+        so.customer = customer
+        so.customer_name = params.get("customer_name")
+        so.company = sales_person_details.company
+        so.transaction_date = posting_date
+        so.delivery_date = delivery_date
+        so.order_type = "Sales"
+        so.selling_price_list = effective_price_list
+        so.set_warehouse = sales_person_details.warehouse
+        so.cost_center = sales_person_details.cost_center
+        if payment_type:
+            so.custom_payment_type = payment_type
+        so.custom_mobile_app = 1
+
+        response_items = []
+        for item in items:
+            item_code = item.get("item_code")
+            qty = item.get("qty", 1)
+            uom = item.get("uom")
+            description = item.get("description")
+            if description:
+                description = strip_html_tags(description)
+            provided_rate = item.get("rate")
+            is_free_item = item.get("is_free_item", False)
+
+            item_price = frappe.db.sql(
+                """
+                SELECT price_list_rate
+                FROM `tabItem Price`
+                WHERE item_code = %(item_code)s
+                AND uom = %(uom)s
+                AND price_list = %(price_list)s
+                ORDER BY uom DESC, creation DESC
+                LIMIT 1
+                """,
+                {"item_code": item_code, "uom": uom, "price_list": effective_price_list},
+                as_dict=True
+            )
+
+            latest_item_price = item_price[0]["price_list_rate"] if item_price else None
+
+            if is_free_item:
+                rate = 0
+            elif latest_item_price is not None:
+                rate = latest_item_price
+            else:
+                rate = provided_rate
+
+            price_list_rate = flt(rate)
+            provided_discount_percentage = flt(item.get("discount_percentage", 0))
+            provided_discount_amount = flt(item.get("discount_amount", 0))
+
+            if provided_discount_percentage and price_list_rate:
+                discount_percentage = provided_discount_percentage
+                discount_amount = (price_list_rate * discount_percentage) / 100
+            elif provided_discount_amount and price_list_rate:
+                discount_amount = provided_discount_amount
+                discount_percentage = (discount_amount / price_list_rate) * 100
+            else:
+                discount_percentage = 0
+                discount_amount = 0
+
+            discounted_rate = price_list_rate - discount_amount
+
+            item_data = {
+                "item_code": item_code,
+                "qty": qty,
+                "uom": uom,
+                "description": description,
+                "warehouse": sales_person_details.warehouse,
+                "cost_center": sales_person_details.cost_center,
+                "discount_percentage": discount_percentage,
+                "discount_amount": discount_amount,
+                "rate": discounted_rate,
+                "price_list_rate": price_list_rate,
+                "delivery_date": delivery_date,
+                "is_free_item": is_free_item
+            }
+
+            batch_no = item.get("batch_no")
+            if batch_no:
+                item_data["use_serial_batch_fields"] = 1
+                item_data["batch_no"] = batch_no
+
+            so.append("items", item_data)
+
+            response_items.append({
+                "item_code": item_code,
+                "description": description,
+                "qty": qty,
+                "uom": uom,
+                "discount_amount": discount_amount,
+                "discount_percentage": discount_percentage,
+                "price_list_rate": price_list_rate,
+                "rate": discounted_rate,
+                "is_free_item": is_free_item
+            })
+
+        frappe.flags.ignore_permissions = True
+        so.run_method("set_missing_values")
+        frappe.flags.ignore_permissions = False
+
+        if additional_discount_amount:
+            so.apply_discount_on = "Net Total"
+            so.discount_amount = additional_discount_amount
+
+        so.run_method("calculate_taxes_and_totals")
+
+        po_no = params.get("po_no")
+        remarks_text = params.get("remarks")
+        if po_no:
+            so.po_no = po_no
+        if remarks_text:
+            so.remarks = remarks_text
+
+        so.append("sales_team", {
+            "sales_person": sales_person,
+            "allocated_percentage": 100
+        })
+
+        so.insert(ignore_permissions=True)
+        frappe.db.commit()
+
+        return response(
+            "Sales Order created successfully",
+            {
+                "name": so.name,
+                "docstatus": so.docstatus,
+                "status": so.status,
+                "customer": so.customer,
+                "customer_name": so.customer_name,
+                "posting_date": str(so.transaction_date),
+                "delivery_date": str(so.delivery_date),
+                "total": so.total,
+                "grand_total": so.grand_total,
+                "items": response_items,
+            },
+            True,
+            200,
+        )
+    except Exception as e:
+        frappe.db.rollback()
+        frappe.log_error(title="Create Sales Order Error", message=str(e))
+        return response(str(e), {}, False, 500)
+
+
+@frappe.whitelist(methods="POST")
+def update_sales_order(params):
+    """
+    Update an existing Draft Sales Order.
+
+    Args (via params dict):
+        name: Sales Order name (required)
+        items: list of items to replace (optional)
+        delivery_date: Updated delivery date (optional)
+        po_no: Purchase Order number (optional)
+        remarks: Remarks (optional)
+        custom_payment_type: Payment type (optional)
+        additional_discount_amount: Overall discount amount (optional)
+    """
+    try:
+        if isinstance(params, str):
+            params = json.loads(params)
+
+        so_name = params.get("name")
+        if not so_name:
+            return response("Sales Order name is required", {}, False, 400)
+
+        if not frappe.db.exists("Sales Order", so_name):
+            return response(f"Sales Order {so_name} not found", {}, False, 404)
+
+        so = frappe.get_doc("Sales Order", so_name)
+
+        if so.docstatus != 0:
+            return response("Can only update Sales Order in Draft state", {}, False, 400)
+
+        sales_person = frappe.db.get_value("Sales Person", {"custom_user": frappe.session.user}, "name")
+        settings = get_basket4me_settings()
+        sales_person_details = None
+        for detail in settings.sales_person_details:
+            if detail.sales_person == sales_person:
+                sales_person_details = detail
+
+        if not sales_person_details:
+            return response(f"No Basket4Me Settings found for sales person {sales_person}", {}, False, 400)
+
+        customer = params.get("customer") or so.customer
+        effective_price_list = get_effective_price_list(customer=customer, sales_person=sales_person)
+
+        items = params.get("items")
+        delivery_date = params.get("delivery_date") or str(so.delivery_date)
+
+        if params.get("customer"):
+            so.customer = params.get("customer")
+        if params.get("customer_name"):
+            so.customer_name = params.get("customer_name")
+        if params.get("delivery_date"):
+            so.delivery_date = params.get("delivery_date")
+        if params.get("custom_payment_type") or params.get("payment_type"):
+            so.custom_payment_type = params.get("custom_payment_type") or params.get("payment_type")
+        if params.get("po_no"):
+            so.po_no = params.get("po_no")
+        if params.get("remarks"):
+            so.remarks = params.get("remarks")
+
+        additional_discount_amount = flt(params.get("additional_discount_amount") or params.get("discount_amount") or 0)
+
+        if items and isinstance(items, list):
+            so.items = []
+            so.selling_price_list = effective_price_list
+
+            for item in items:
+                item_code = item.get("item_code")
+                qty = item.get("qty", 1)
+                uom = item.get("uom")
+                description = item.get("description")
+                if description:
+                    description = strip_html_tags(description)
+                provided_rate = item.get("rate")
+                is_free_item = item.get("is_free_item", False)
+
+                item_price = frappe.db.sql(
+                    """
+                    SELECT price_list_rate
+                    FROM `tabItem Price`
+                    WHERE item_code = %(item_code)s
+                    AND uom = %(uom)s
+                    AND price_list = %(price_list)s
+                    ORDER BY uom DESC, creation DESC
+                    LIMIT 1
+                    """,
+                    {"item_code": item_code, "uom": uom, "price_list": effective_price_list},
+                    as_dict=True
+                )
+
+                latest_item_price = item_price[0]["price_list_rate"] if item_price else None
+
+                if is_free_item:
+                    rate = 0
+                elif latest_item_price is not None:
+                    rate = latest_item_price
+                else:
+                    rate = provided_rate
+
+                price_list_rate = flt(rate)
+                provided_discount_percentage = flt(item.get("discount_percentage", 0))
+                provided_discount_amount = flt(item.get("discount_amount", 0))
+
+                if provided_discount_percentage and price_list_rate:
+                    discount_percentage = provided_discount_percentage
+                    discount_amount = (price_list_rate * discount_percentage) / 100
+                elif provided_discount_amount and price_list_rate:
+                    discount_amount = provided_discount_amount
+                    discount_percentage = (discount_amount / price_list_rate) * 100
+                else:
+                    discount_percentage = 0
+                    discount_amount = 0
+
+                discounted_rate = price_list_rate - discount_amount
+
+                item_data = {
+                    "item_code": item_code,
+                    "qty": qty,
+                    "uom": uom,
+                    "description": description,
+                    "warehouse": sales_person_details.warehouse,
+                    "cost_center": sales_person_details.cost_center,
+                    "discount_percentage": discount_percentage,
+                    "discount_amount": discount_amount,
+                    "rate": discounted_rate,
+                    "price_list_rate": price_list_rate,
+                    "delivery_date": delivery_date,
+                    "is_free_item": is_free_item
+                }
+
+                batch_no = item.get("batch_no")
+                if batch_no:
+                    item_data["use_serial_batch_fields"] = 1
+                    item_data["batch_no"] = batch_no
+
+                so.append("items", item_data)
+
+        frappe.flags.ignore_permissions = True
+        so.run_method("set_missing_values")
+        frappe.flags.ignore_permissions = False
+
+        if additional_discount_amount:
+            so.apply_discount_on = "Net Total"
+            so.discount_amount = additional_discount_amount
+
+        so.run_method("calculate_taxes_and_totals")
+        so.save(ignore_permissions=True)
+        frappe.db.commit()
+
+        return response(
+            "Sales Order updated successfully",
+            {
+                "name": so.name,
+                "docstatus": so.docstatus,
+                "status": so.status,
+                "customer": so.customer,
+                "customer_name": so.customer_name,
+                "total": so.total,
+                "grand_total": so.grand_total,
+                "items": [
+                    {
+                        "item_code": item.item_code,
+                        "item_name": item.item_name,
+                        "qty": item.qty,
+                        "rate": item.rate,
+                        "amount": item.amount
+                    } for item in so.items
+                ],
+            },
+            True,
+            200,
+        )
+    except Exception as e:
+        frappe.db.rollback()
+        frappe.log_error(title="Update Sales Order Error", message=str(e))
+        return response(str(e), {}, False, 500)
+
+
+@frappe.whitelist(methods="POST")
+def submit_sales_order(params):
+    """Submit a Draft Sales Order."""
+    try:
+        if isinstance(params, str):
+            params = json.loads(params)
+
+        so_name = params.get("name")
+        if not so_name:
+            return response("Sales Order name is required", {}, False, 400)
+
+        if not frappe.db.exists("Sales Order", so_name):
+            return response(f"Sales Order {so_name} not found", {}, False, 404)
+
+        so = frappe.get_doc("Sales Order", so_name)
+        if so.docstatus != 0:
+            return response("Sales Order is not in Draft state", {}, False, 400)
+
+        so.submit()
+        frappe.db.commit()
+
+        return response(
+            "Sales Order submitted successfully",
+            {
+                "name": so.name,
+                "docstatus": so.docstatus,
+                "status": so.status,
+                "grand_total": so.grand_total,
+            },
+            True,
+            200,
+        )
+    except Exception as e:
+        frappe.db.rollback()
+        frappe.log_error(title="Submit Sales Order Error", message=str(e))
+        return response(str(e), {}, False, 500)
+
+
+@frappe.whitelist(methods="POST")
+def cancel_sales_order(params):
+    """Cancel a submitted Sales Order."""
+    try:
+        if isinstance(params, str):
+            params = json.loads(params)
+
+        so_name = params.get("name")
+        if not so_name:
+            return response("Sales Order name is required", {}, False, 400)
+
+        if not frappe.db.exists("Sales Order", so_name):
+            return response(f"Sales Order {so_name} not found", {}, False, 404)
+
+        so = frappe.get_doc("Sales Order", so_name)
+        if so.docstatus != 1:
+            return response("Only submitted Sales Orders can be cancelled", {}, False, 400)
+
+        so.cancel()
+        frappe.db.commit()
+
+        return response(
+            "Sales Order cancelled successfully",
+            {"name": so.name, "docstatus": so.docstatus, "status": so.status},
+            True,
+            200,
+        )
+    except Exception as e:
+        frappe.db.rollback()
+        frappe.log_error(title="Cancel Sales Order Error", message=str(e))
+        return response(str(e), {}, False, 500)
+
+
+@frappe.whitelist(methods="POST")
+def delete_sales_order(params):
+    """Delete a Draft or Cancelled Sales Order."""
+    try:
+        if isinstance(params, str):
+            params = json.loads(params)
+
+        so_name = params.get("name")
+        if not so_name:
+            return response("Sales Order name is required", {}, False, 400)
+
+        if not frappe.db.exists("Sales Order", so_name):
+            return response(f"Sales Order {so_name} not found", {}, False, 404)
+
+        so = frappe.get_doc("Sales Order", so_name)
+        if so.docstatus == 1:
+            return response("Cannot delete a submitted Sales Order. Cancel it first.", {}, False, 400)
+
+        frappe.delete_doc("Sales Order", so_name, ignore_permissions=True)
+        frappe.db.commit()
+
+        return response(f"Sales Order {so_name} deleted successfully", {}, True, 200)
+    except Exception as e:
+        frappe.db.rollback()
+        frappe.log_error(title="Delete Sales Order Error", message=str(e))
+        return response(str(e), {}, False, 500)
+
+
+@frappe.whitelist(methods="GET")
+def get_sales_order_list(name=None, customer=None, status=None, search=None, from_date=None, to_date=None, limit_start=0, limit_page_length=20):
+    """
+    List Sales Orders with filters.
+
+    Query params:
+        name: Filter by exact SO name
+        customer: Filter by customer
+        status: Filter by status (Draft, To Deliver and Bill, Completed, Cancelled, etc.)
+        search: Search by SO name or customer name
+        from_date / to_date: Date range filter on transaction_date
+        limit_start / limit_page_length: Pagination
+    """
+    try:
+        sales_person = frappe.db.get_value("Sales Person", {"custom_user": frappe.session.user}, "name")
+
+        filters = {}
+        if name:
+            filters["name"] = name
+        if customer:
+            filters["customer"] = customer
+        if status:
+            if status == "Draft":
+                filters["docstatus"] = 0
+            elif status == "Cancelled":
+                filters["docstatus"] = 2
+            else:
+                filters["docstatus"] = 1
+                filters["status"] = status
+
+        if from_date and to_date:
+            filters["transaction_date"] = ["between", [from_date, to_date]]
+        elif from_date:
+            filters["transaction_date"] = [">=", from_date]
+        elif to_date:
+            filters["transaction_date"] = ["<=", to_date]
+
+        or_filters = None
+        if search:
+            or_filters = [
+                ["name", "like", f"%{search}%"],
+                ["customer_name", "like", f"%{search}%"],
+            ]
+
+        fields = [
+            "name", "customer", "customer_name", "transaction_date", "delivery_date",
+            "docstatus", "status", "total", "net_total", "grand_total", "currency",
+            "per_delivered", "per_billed"
+        ]
+
+        sales_orders = frappe.get_all(
+            "Sales Order",
+            filters=filters,
+            or_filters=or_filters,
+            fields=fields,
+            order_by="creation desc",
+            limit_start=int(limit_start),
+            limit_page_length=int(limit_page_length)
+        )
+
+        total_count = frappe.db.count("Sales Order", filters=filters)
+
+        for so in sales_orders:
+            so["items"] = frappe.get_all(
+                "Sales Order Item",
+                filters={"parent": so["name"]},
+                fields=["item_code", "item_name", "qty", "uom", "rate", "amount"]
+            )
+
+        return response(
+            "Sales Orders fetched successfully",
+            {
+                "sales_orders": sales_orders,
+                "total_count": total_count,
+                "limit_start": int(limit_start),
+                "limit_page_length": int(limit_page_length)
+            },
+            True,
+            200,
+        )
+    except Exception as e:
+        frappe.log_error(title="Get Sales Orders Error", message=str(e))
+        return response(str(e), {}, False, 500)
+
+
+@frappe.whitelist(methods="GET")
+def get_sales_order_detail(name=None):
+    """Get single Sales Order with full details."""
+    try:
+        if not name:
+            return response("Sales Order name is required", {}, False, 400)
+
+        if not frappe.db.exists("Sales Order", name):
+            return response(f"Sales Order {name} not found", {}, False, 404)
+
+        so = frappe.get_doc("Sales Order", name)
+
+        return response(
+            "Sales Order fetched successfully",
+            {
+                "name": so.name,
+                "customer": so.customer,
+                "customer_name": so.customer_name,
+                "transaction_date": str(so.transaction_date),
+                "delivery_date": str(so.delivery_date),
+                "docstatus": so.docstatus,
+                "status": so.status,
+                "company": so.company,
+                "currency": so.currency,
+                "selling_price_list": so.selling_price_list,
+                "total": so.total,
+                "net_total": so.net_total,
+                "total_taxes_and_charges": so.total_taxes_and_charges,
+                "grand_total": so.grand_total,
+                "per_delivered": so.per_delivered,
+                "per_billed": so.per_billed,
+                "po_no": so.po_no,
+                "items": [
+                    {
+                        "name": item.name,
+                        "item_code": item.item_code,
+                        "item_name": item.item_name,
+                        "description": item.description,
+                        "qty": item.qty,
+                        "uom": item.uom,
+                        "rate": item.rate,
+                        "price_list_rate": item.price_list_rate,
+                        "discount_percentage": item.discount_percentage,
+                        "discount_amount": item.discount_amount,
+                        "amount": item.amount,
+                        "warehouse": item.warehouse,
+                        "delivery_date": str(item.delivery_date) if item.delivery_date else None,
+                    } for item in so.items
+                ],
+                "taxes": [
+                    {
+                        "charge_type": tax.charge_type,
+                        "account_head": tax.account_head,
+                        "description": tax.description,
+                        "rate": tax.rate,
+                        "tax_amount": tax.tax_amount,
+                        "total": tax.total,
+                        "included_in_print_rate": tax.included_in_print_rate
+                    } for tax in so.taxes
+                ] if so.taxes else [],
+                "sales_team": [
+                    {
+                        "sales_person": st.sales_person,
+                        "allocated_percentage": st.allocated_percentage,
+                    } for st in so.sales_team
+                ] if so.sales_team else [],
+            },
+            True,
+            200,
+        )
+    except Exception as e:
+        frappe.log_error(title="Get Sales Order Detail Error", message=str(e))
+        return response(str(e), {}, False, 500)
+
+
+@frappe.whitelist(methods="POST")
+def convert_so_to_si(params):
+    """
+    Convert one or more submitted Sales Orders into a single Sales Invoice.
+    Draft Sales Orders will be automatically submitted first.
+
+    Args (via params dict):
+        sales_orders: list of Sales Order names ["SO-001", "SO-002"] (required)
+        payments: list of payment entries [{"mode_of_payment": "Cash", "amount": 100}] (optional)
+    """
+    try:
+        if isinstance(params, str):
+            params = json.loads(params)
+
+        sales_orders = params.get("sales_orders")
+        payments = params.get("payments")
+
+        if not sales_orders or not isinstance(sales_orders, list) or len(sales_orders) == 0:
+            return response("sales_orders list is required", {}, False, 400)
+
+        sales_person = frappe.db.get_value("Sales Person", {"custom_user": frappe.session.user}, "name")
+        settings = get_basket4me_settings()
+        sales_person_details = None
+        for detail in settings.sales_person_details:
+            if detail.sales_person == sales_person:
+                sales_person_details = detail
+
+        if not sales_person_details:
+            return response(f"No Basket4Me Settings found for sales person {sales_person}", {}, False, 400)
+
+        # Validate all SOs exist and belong to same customer
+        first_so = frappe.get_doc("Sales Order", sales_orders[0])
+        for so_name in sales_orders:
+            if not frappe.db.exists("Sales Order", so_name):
+                return response(f"Sales Order {so_name} not found", {}, False, 404)
+            so = frappe.get_doc("Sales Order", so_name)
+            if so.customer != first_so.customer:
+                return response(f"All Sales Orders must belong to same customer. {so_name} has different customer.", {}, False, 400)
+            if so.status == "Completed" or so.per_billed >= 100:
+                return response(f"Sales Order {so_name} is already fully billed", {}, False, 400)
+            if so.per_billed > 0:
+                return response(f"Sales Order {so_name} is partially billed ({so.per_billed}%)", {}, False, 400)
+
+        # Submit draft SOs
+        for so_name in sales_orders:
+            so = frappe.get_doc("Sales Order", so_name)
+            if so.docstatus == 0:
+                so.submit()
+
+        # Reload first SO after submission
+        first_so = frappe.get_doc("Sales Order", sales_orders[0])
+
+        # Create Sales Invoice
+        si = frappe.new_doc("Sales Invoice")
+        si.customer = first_so.customer
+        si.customer_name = first_so.customer_name
+        si.company = sales_person_details.company
+        si.posting_date = nowdate()
+        si.due_date = nowdate()
+        si.currency = first_so.currency
+        si.selling_price_list = first_so.selling_price_list
+        si.cost_center = sales_person_details.cost_center
+        si.update_stock = 1
+        si.custom_mobile_app = 1
+
+        # Copy taxes from first SO
+        for tax in first_so.taxes or []:
+            tax_amount = tax.tax_amount if tax.charge_type == "Actual" else 0
+            si.append("taxes", {
+                "charge_type": tax.charge_type,
+                "account_head": tax.account_head,
+                "description": tax.description,
+                "rate": tax.rate,
+                "cost_center": tax.cost_center,
+                "included_in_print_rate": tax.included_in_print_rate,
+                "tax_amount": tax_amount
+            })
+
+        # Add items from all SOs with SO linkage
+        for so_name in sales_orders:
+            so = frappe.get_doc("Sales Order", so_name)
+            for item in so.items:
+                si.append("items", {
+                    "item_code": item.item_code,
+                    "item_name": item.item_name,
+                    "description": item.description,
+                    "qty": item.qty,
+                    "uom": item.uom,
+                    "rate": item.rate,
+                    "price_list_rate": item.price_list_rate,
+                    "discount_percentage": item.discount_percentage,
+                    "discount_amount": item.discount_amount,
+                    "warehouse": item.warehouse,
+                    "cost_center": sales_person_details.cost_center,
+                    "sales_order": so.name,
+                    "so_detail": item.name,
+                })
+
+        # Add payments
+        if payments and isinstance(payments, list):
+            for payment in payments:
+                si.append("payments", {
+                    "mode_of_payment": payment.get("mode_of_payment"),
+                    "amount": payment.get("amount", 0)
+                })
+
+        si.append("sales_team", {
+            "sales_person": sales_person,
+            "allocated_percentage": 100
+        })
+
+        si.insert(ignore_permissions=True)
+        si.submit()
+        frappe.db.commit()
+
+        return response(
+            "Sales Invoice created from Sales Order(s)",
+            {
+                "sales_invoice": si.name,
+                "sales_orders_linked": sales_orders,
+                "customer": si.customer,
+                "customer_name": si.customer_name,
+                "grand_total": si.grand_total,
+                "docstatus": si.docstatus,
+                "items": [
+                    {
+                        "item_code": item.item_code,
+                        "item_name": item.item_name,
+                        "qty": item.qty,
+                        "rate": item.rate,
+                        "amount": item.amount,
+                        "sales_order": item.sales_order
+                    } for item in si.items
+                ],
+            },
+            True,
+            200,
+        )
+    except Exception as e:
+        frappe.db.rollback()
+        frappe.log_error(title="Convert SO to SI Error", message=str(e))
+        return response(str(e), {}, False, 500)
+
+
+# ==================== DASHBOARD APIs ====================
+
+@frappe.whitelist(methods="GET")
+def get_dashboard_summary(period="daily", from_date=None, to_date=None):
+    """
+    Dashboard summary for Van Sales workflow.
+
+    Args:
+        period: "daily" | "weekly" | "monthly" (ignored if from_date/to_date provided)
+        from_date / to_date: Custom date range
+    Returns:
+        Total Order Value, Total Customers, Total Collection, Total Invoices,
+        Total Returns, Total Visited Customers
+    """
+    try:
+        today = nowdate()
+        sales_person = frappe.db.get_value("Sales Person", {"custom_user": frappe.session.user}, "name")
+        if not sales_person:
+            return response("No Sales Person linked to the logged-in user", {}, False, 400)
+
+        if from_date and to_date:
+            start, end = from_date, to_date
+        elif period == "weekly":
+            from frappe.utils import add_days, get_first_day_of_week
+            start = get_first_day_of_week(today)
+            end = today
+        elif period == "monthly":
+            from frappe.utils import get_first_day
+            start = get_first_day(today)
+            end = today
+        else:
+            start = end = today
+
+        override = should_override_sales_team()
+
+        # Sales Order totals
+        so_join = "LEFT JOIN" if override else "JOIN"
+        so_cond = "(st.sales_person = %s OR st.sales_person IS NULL)" if override else "st.sales_person = %s"
+        so_sql = f"""
+            SELECT COALESCE(SUM(so.grand_total), 0) as total_value,
+                   COUNT(DISTINCT so.name) as total_count,
+                   COUNT(DISTINCT so.customer) as total_customers
+            FROM `tabSales Order` so
+            {so_join} `tabSales Team` st ON so.name = st.parent
+            WHERE so.docstatus = 1 AND {so_cond}
+            AND so.transaction_date BETWEEN %s AND %s
+        """
+        so_row = frappe.db.sql(so_sql, (sales_person, start, end), as_dict=True)[0]
+
+        # Sales Invoice totals (non-return)
+        si_join = "LEFT JOIN" if override else "JOIN"
+        si_cond = "(st.sales_person = %s OR st.sales_person IS NULL)" if override else "st.sales_person = %s"
+        si_sql = f"""
+            SELECT COALESCE(SUM(si.grand_total), 0) as total_value,
+                   COUNT(DISTINCT si.name) as total_count,
+                   COUNT(DISTINCT si.customer) as total_customers
+            FROM `tabSales Invoice` si
+            {si_join} `tabSales Team` st ON si.name = st.parent
+            WHERE si.docstatus = 1 AND si.is_return = 0 AND {si_cond}
+            AND si.posting_date BETWEEN %s AND %s
+        """
+        si_row = frappe.db.sql(si_sql, (sales_person, start, end), as_dict=True)[0]
+
+        # Return totals
+        ret_sql = f"""
+            SELECT COALESCE(SUM(ABS(si.grand_total)), 0) as total_value,
+                   COUNT(DISTINCT si.name) as total_count,
+                   COUNT(DISTINCT si.customer) as total_customers
+            FROM `tabSales Invoice` si
+            {si_join} `tabSales Team` st ON si.name = st.parent
+            WHERE si.docstatus = 1 AND si.is_return = 1 AND {si_cond}
+            AND si.posting_date BETWEEN %s AND %s
+        """
+        ret_row = frappe.db.sql(ret_sql, (sales_person, start, end), as_dict=True)[0]
+
+        # Collection totals
+        coll_sql = """
+            SELECT COALESCE(SUM(pe.paid_amount), 0) as total_value,
+                   COUNT(DISTINCT pe.name) as total_count,
+                   COUNT(DISTINCT pe.party) as total_customers
+            FROM `tabPayment Entry` pe
+            WHERE pe.docstatus = 1 AND pe.payment_type = 'Receive'
+            AND pe.posting_date BETWEEN %s AND %s
+            AND pe.custom_sales_person = %s
+        """
+        coll_row = frappe.db.sql(coll_sql, (start, end, sales_person), as_dict=True)[0]
+
+        # Visited customers (using Activity Log or custom tracking)
+        visited_customers = 0
+        if frappe.db.exists("DocType", "Customer Visit"):
+            visited_customers = frappe.db.count("Customer Visit", {
+                "sales_person": sales_person,
+                "visit_date": ["between", [start, end]],
+                "docstatus": ["!=", 2]
+            })
+
+        return response(
+            "Dashboard summary fetched",
+            {
+                "period": period,
+                "from_date": str(start),
+                "to_date": str(end),
+                "sales_person": sales_person,
+                "orders": {
+                    "total_value": so_row.total_value,
+                    "total_count": so_row.total_count,
+                    "total_customers": so_row.total_customers,
+                },
+                "invoices": {
+                    "total_value": si_row.total_value,
+                    "total_count": si_row.total_count,
+                    "total_customers": si_row.total_customers,
+                },
+                "returns": {
+                    "total_value": ret_row.total_value,
+                    "total_count": ret_row.total_count,
+                    "total_customers": ret_row.total_customers,
+                },
+                "collections": {
+                    "total_value": coll_row.total_value,
+                    "total_count": coll_row.total_count,
+                    "total_customers": coll_row.total_customers,
+                },
+                "visited_customers": visited_customers,
+            },
+            True, 200,
+        )
+    except Exception as e:
+        frappe.log_error(title="Dashboard Summary Error", message=str(e))
+        return response(str(e), {}, False, 500)
+
+
+# ==================== CUSTOMER VISIT APIs ====================
+
+@frappe.whitelist(methods="POST")
+def mark_customer_visit(params):
+    """
+    Record a customer visit.
+
+    Args (via params):
+        customer: Customer name (required)
+        latitude / longitude: GPS coordinates (optional)
+        remarks: Visit notes (optional)
+    """
+    try:
+        if isinstance(params, str):
+            params = json.loads(params)
+
+        customer = params.get("customer")
+        if not customer:
+            return response("Customer is required", {}, False, 400)
+
+        sales_person = frappe.db.get_value("Sales Person", {"custom_user": frappe.session.user}, "name")
+        if not sales_person:
+            return response("No Sales Person linked", {}, False, 400)
+
+        # Use Comment as a lightweight visit log (no custom doctype needed)
+        comment = frappe.get_doc({
+            "doctype": "Comment",
+            "comment_type": "Info",
+            "reference_doctype": "Customer",
+            "reference_name": customer,
+            "content": json.dumps({
+                "type": "customer_visit",
+                "sales_person": sales_person,
+                "visit_date": nowdate(),
+                "visit_time": frappe.utils.now_datetime().strftime("%H:%M:%S"),
+                "latitude": params.get("latitude"),
+                "longitude": params.get("longitude"),
+                "remarks": params.get("remarks", ""),
+            }),
+            "comment_email": frappe.session.user,
+        })
+        comment.insert(ignore_permissions=True)
+        frappe.db.commit()
+
+        return response(
+            "Customer visit recorded",
+            {
+                "customer": customer,
+                "sales_person": sales_person,
+                "visit_date": nowdate(),
+            },
+            True, 200,
+        )
+    except Exception as e:
+        frappe.log_error(title="Mark Customer Visit Error", message=str(e))
+        return response(str(e), {}, False, 500)
+
+
+@frappe.whitelist(methods="GET")
+def get_customer_visits(customer=None, from_date=None, to_date=None):
+    """Get customer visit history for the logged-in salesperson."""
+    try:
+        sales_person = frappe.db.get_value("Sales Person", {"custom_user": frappe.session.user}, "name")
+        if not sales_person:
+            return response("No Sales Person linked", {}, False, 400)
+
+        today = nowdate()
+        start = from_date or today
+        end = to_date or today
+
+        visits = frappe.db.sql("""
+            SELECT c.reference_name as customer, c.content, c.creation
+            FROM `tabComment` c
+            WHERE c.comment_type = 'Info'
+            AND c.reference_doctype = 'Customer'
+            AND c.comment_email = %s
+            AND c.content LIKE '%%customer_visit%%'
+            AND DATE(c.creation) BETWEEN %s AND %s
+            ORDER BY c.creation DESC
+        """, (frappe.session.user, start, end), as_dict=True)
+
+        result = []
+        for v in visits:
+            try:
+                data = json.loads(v.content)
+                data["customer"] = v.reference_name
+                data["customer_name"] = frappe.db.get_value("Customer", v.reference_name, "customer_name")
+                data["creation"] = str(v.creation)
+                result.append(data)
+            except Exception:
+                pass
+
+        # Get visited customer names for this date range
+        visited_customers = list(set([r["customer"] for r in result]))
+
+        return response(
+            "Customer visits fetched",
+            {
+                "visits": result,
+                "visited_count": len(visited_customers),
+                "visited_customers": visited_customers,
+            },
+            True, 200,
+        )
+    except Exception as e:
+        frappe.log_error(title="Get Customer Visits Error", message=str(e))
+        return response(str(e), {}, False, 500)
+
+
+@frappe.whitelist(methods="GET")
+def get_customer_list_v2(name=None, mobile_no=None, territory=None, route=None,
+                         visit_status=None, limit_start=0, limit_page_length=20):
+    """
+    Enhanced customer list with route/territory, visit status, outstanding balance.
+
+    Args:
+        name: Search by name/ID
+        mobile_no: Search by mobile
+        territory: Filter by territory (route)
+        route: Alias for territory
+        visit_status: "visited" | "not_visited" | None (all)
+        limit_start / limit_page_length: Pagination
+    """
+    try:
+        sales_person = frappe.db.get_value("Sales Person", {"custom_user": frappe.session.user}, "name")
+        override_enabled = should_override_sales_team()
+
+        filters = {}
+        or_filters = None
+
+        if name:
+            or_filters = [
+                ["customer_name", "like", f"%{name}%"],
+                ["name", "like", f"%{name}%"],
+            ]
+        if mobile_no:
+            filters["mobile_no"] = ["like", f"%{mobile_no}%"]
+
+        route_filter = route or territory
+        if route_filter:
+            filters["territory"] = route_filter
+
+        fields = [
+            "name", "customer_name", "mobile_no", "territory",
+            "default_price_list", "customer_group",
+            "custom_latitude", "custom_longitude",
+        ]
+
+        # Add custom fields if they exist
+        for f in ["custom_route", "custom_visit_sequence"]:
+            if frappe.db.has_column("Customer", f):
+                fields.append(f)
+
+        customers = frappe.get_all(
+            "Customer",
+            filters=filters,
+            or_filters=or_filters,
+            fields=fields,
+            ignore_permissions=override_enabled,
+            limit_start=int(limit_start),
+            limit_page_length=int(limit_page_length),
+            order_by="customer_name asc",
+        )
+
+        # Get today's visited customers
+        today = nowdate()
+        visited_set = set()
+        visit_rows = frappe.db.sql("""
+            SELECT DISTINCT reference_name
+            FROM `tabComment`
+            WHERE comment_type = 'Info'
+            AND reference_doctype = 'Customer'
+            AND comment_email = %s
+            AND content LIKE '%%customer_visit%%'
+            AND DATE(creation) = %s
+        """, (frappe.session.user, today))
+        for row in visit_rows:
+            visited_set.add(row[0])
+
+        result = []
+        for c in customers:
+            c["visit_status"] = "visited" if c["name"] in visited_set else "not_visited"
+            # Outstanding balance
+            c["outstanding_balance"] = frappe.db.sql("""
+                SELECT COALESCE(SUM(outstanding_amount), 0)
+                FROM `tabSales Invoice`
+                WHERE customer = %s AND docstatus = 1 AND outstanding_amount > 0
+            """, c["name"])[0][0] or 0
+
+            # Apply visit_status filter
+            if visit_status:
+                if visit_status == "visited" and c["visit_status"] != "visited":
+                    continue
+                if visit_status == "not_visited" and c["visit_status"] != "not_visited":
+                    continue
+            result.append(c)
+
+        total_count = len(result)
+        return response(
+            "Customer list fetched",
+            {"customers": result, "total_count": total_count},
+            True, 200,
+        )
+    except Exception as e:
+        frappe.log_error(title="Get Customer List V2 Error", message=str(e))
+        return response(str(e), {}, False, 500)
+
+
+@frappe.whitelist(methods="GET")
+def get_customer_balance_summary(customer=None):
+    """
+    Get customer balance summary: old balance, current balance, total.
+    """
+    try:
+        if not customer:
+            return response("Customer is required", {}, False, 400)
+
+        # Total outstanding
+        total_outstanding = frappe.db.sql("""
+            SELECT COALESCE(SUM(outstanding_amount), 0)
+            FROM `tabSales Invoice`
+            WHERE customer = %s AND docstatus = 1
+        """, customer)[0][0] or 0
+
+        # Current period (today's invoices outstanding)
+        today = nowdate()
+        current_balance = frappe.db.sql("""
+            SELECT COALESCE(SUM(outstanding_amount), 0)
+            FROM `tabSales Invoice`
+            WHERE customer = %s AND docstatus = 1 AND posting_date = %s
+        """, (customer, today))[0][0] or 0
+
+        old_balance = flt(total_outstanding) - flt(current_balance)
+
+        # Credit limit
+        credit_limit = frappe.db.get_value("Customer Credit Limit",
+            {"parent": customer, "parenttype": "Customer"},
+            "credit_limit") or 0
+
+        return response(
+            "Customer balance summary",
+            {
+                "customer": customer,
+                "old_balance": old_balance,
+                "current_balance": current_balance,
+                "total_balance": total_outstanding,
+                "credit_limit": credit_limit,
+            },
+            True, 200,
+        )
+    except Exception as e:
+        frappe.log_error(title="Customer Balance Summary Error", message=str(e))
+        return response(str(e), {}, False, 500)
+
+
+# ==================== ITEM ENHANCED APIs ====================
+
+@frappe.whitelist(methods="GET")
+def get_item_stock(item_code=None, warehouse=None):
+    """
+    Get stock qty for an item across warehouses (or specific warehouse).
+
+    Returns actual_qty, reserved_qty, projected_qty per warehouse.
+    """
+    try:
+        if not item_code:
+            return response("item_code is required", {}, False, 400)
+
+        filters = {"item_code": item_code}
+        if warehouse:
+            filters["warehouse"] = warehouse
+
+        bins = frappe.get_all(
+            "Bin",
+            filters=filters,
+            fields=["warehouse", "actual_qty", "reserved_qty", "projected_qty", "ordered_qty"],
+        )
+
+        return response(
+            "Item stock fetched",
+            {"item_code": item_code, "warehouses": bins},
+            True, 200,
+        )
+    except Exception as e:
+        frappe.log_error(title="Get Item Stock Error", message=str(e))
+        return response(str(e), {}, False, 500)
+
+
+@frappe.whitelist(methods="GET")
+def get_item_pricing_details(item_code=None, customer=None, uom=None):
+    """
+    Get comprehensive pricing for an item:
+    - MRP (standard_rate from Item master)
+    - Last Sales Price (from last Sales Invoice)
+    - Price List price (from customer's effective price list)
+    - All available UOMs with conversion factors
+    """
+    try:
+        if not item_code:
+            return response("item_code is required", {}, False, 400)
+
+        item = frappe.get_doc("Item", item_code)
+        sales_person = frappe.db.get_value("Sales Person", {"custom_user": frappe.session.user}, "name")
+        effective_price_list = get_effective_price_list(customer=customer, sales_person=sales_person)
+
+        # MRP
+        mrp = item.standard_rate or 0
+
+        # Last Sales Price for this item
+        last_price_row = frappe.db.sql("""
+            SELECT sii.rate, sii.uom, si.posting_date, si.customer
+            FROM `tabSales Invoice Item` sii
+            JOIN `tabSales Invoice` si ON sii.parent = si.name
+            WHERE sii.item_code = %s AND si.docstatus = 1 AND si.is_return = 0
+            ORDER BY si.posting_date DESC, si.creation DESC
+            LIMIT 1
+        """, item_code, as_dict=True)
+        last_sales_price = last_price_row[0].rate if last_price_row else 0
+        last_sales_info = last_price_row[0] if last_price_row else {}
+
+        # Price List Price (for the target UOM or default)
+        target_uom = uom or item.stock_uom
+        price_list_rate = 0
+        price_row = frappe.db.sql("""
+            SELECT price_list_rate, uom
+            FROM `tabItem Price`
+            WHERE item_code = %s AND price_list = %s AND uom = %s
+            ORDER BY creation DESC LIMIT 1
+        """, (item_code, effective_price_list, target_uom), as_dict=True)
+        if price_row:
+            price_list_rate = price_row[0].price_list_rate
+
+        # If no UOM-specific price, try without UOM filter
+        if not price_list_rate:
+            price_row2 = frappe.db.sql("""
+                SELECT price_list_rate, uom
+                FROM `tabItem Price`
+                WHERE item_code = %s AND price_list = %s
+                ORDER BY creation DESC LIMIT 1
+            """, (item_code, effective_price_list), as_dict=True)
+            if price_row2:
+                price_list_rate = price_row2[0].price_list_rate
+
+        # UOM details with conversion factors
+        uoms = []
+        for uom_row in item.uoms or []:
+            uoms.append({
+                "uom": uom_row.uom,
+                "conversion_factor": uom_row.conversion_factor,
+            })
+        # Ensure stock UOM is included
+        if not any(u["uom"] == item.stock_uom for u in uoms):
+            uoms.insert(0, {"uom": item.stock_uom, "conversion_factor": 1})
+
+        # Tax rate
+        tax_rate = get_item_tax_rate(item_code) if 'get_item_tax_rate' in dir() else 0
+
+        return response(
+            "Item pricing details",
+            {
+                "item_code": item_code,
+                "item_name": item.item_name,
+                "stock_uom": item.stock_uom,
+                "mrp": mrp,
+                "last_sales_price": last_sales_price,
+                "last_sales_info": {
+                    "rate": last_sales_info.get("rate", 0),
+                    "uom": last_sales_info.get("uom", ""),
+                    "date": str(last_sales_info.get("posting_date", "")),
+                    "customer": last_sales_info.get("customer", ""),
+                } if last_sales_info else {},
+                "price_list": effective_price_list,
+                "price_list_rate": price_list_rate,
+                "uoms": uoms,
+                "tax_rate": tax_rate,
+            },
+            True, 200,
+        )
+    except Exception as e:
+        frappe.log_error(title="Get Item Pricing Details Error", message=str(e))
+        return response(str(e), {}, False, 500)
+
+
+@frappe.whitelist(methods="GET")
+def get_item_uom_details(item_code=None):
+    """Get all UOMs with conversion factors for an item."""
+    try:
+        if not item_code:
+            return response("item_code is required", {}, False, 400)
+
+        item = frappe.get_doc("Item", item_code)
+        uoms = [{"uom": item.stock_uom, "conversion_factor": 1}]
+        for u in item.uoms or []:
+            if u.uom != item.stock_uom:
+                uoms.append({"uom": u.uom, "conversion_factor": u.conversion_factor})
+
+        return response(
+            "Item UOM details",
+            {"item_code": item_code, "stock_uom": item.stock_uom, "uoms": uoms},
+            True, 200,
+        )
+    except Exception as e:
+        return response(str(e), {}, False, 500)
+
+
+# ==================== DELIVERY NOTE CRUD APIs ====================
+
+@frappe.whitelist(methods="POST")
+def create_delivery_note(params):
+    """
+    Create a Delivery Note in Draft mode.
+
+    Args (via params):
+        customer, items[], delivery_date, po_no, remarks,
+        custom_payment_type, additional_discount_amount
+    """
+    try:
+        if isinstance(params, str):
+            params = json.loads(params)
+
+        sales_person = frappe.db.get_value("Sales Person", {"custom_user": frappe.session.user}, "name")
+        customer = params.get("customer")
+        settings = get_basket4me_settings()
+        sales_person_details = None
+        for detail in settings.sales_person_details:
+            if detail.sales_person == sales_person:
+                sales_person_details = detail
+
+        if not sales_person_details:
+            return response(f"No Basket4Me Settings found for sales person {sales_person}", {}, False, 400)
+
+        effective_price_list = get_effective_price_list(customer=customer, sales_person=sales_person)
+        items = params.get("items")
+        delivery_date = params.get("delivery_date") or nowdate()
+        posting_date = params.get("posting_date") or nowdate()
+        additional_discount_amount = flt(params.get("additional_discount_amount") or 0)
+
+        if not customer:
+            return response("Customer is required", {}, False, 400)
+        if not items or not isinstance(items, list):
+            return response("At least one item is required", {}, False, 400)
+
+        dn = frappe.new_doc("Delivery Note")
+        dn.customer = customer
+        dn.customer_name = params.get("customer_name")
+        dn.company = sales_person_details.company
+        dn.posting_date = posting_date
+        dn.set_warehouse = sales_person_details.warehouse
+        dn.cost_center = sales_person_details.cost_center
+        dn.selling_price_list = effective_price_list
+        if params.get("custom_payment_type"):
+            dn.custom_payment_type = params.get("custom_payment_type")
+        dn.custom_mobile_app = 1
+
+        response_items = []
+        for item in items:
+            item_code = item.get("item_code")
+            qty = item.get("qty", 1)
+            uom = item.get("uom")
+            description = item.get("description")
+            if description:
+                description = strip_html_tags(description)
+            provided_rate = item.get("rate")
+            is_free_item = item.get("is_free_item", False)
+
+            item_price = frappe.db.sql("""
+                SELECT price_list_rate FROM `tabItem Price`
+                WHERE item_code = %s AND uom = %s AND price_list = %s
+                ORDER BY uom DESC, creation DESC LIMIT 1
+            """, (item_code, uom, effective_price_list), as_dict=True)
+            latest_item_price = item_price[0]["price_list_rate"] if item_price else None
+
+            if is_free_item:
+                rate = 0
+            elif latest_item_price is not None:
+                rate = latest_item_price
+            else:
+                rate = provided_rate
+
+            price_list_rate = flt(rate)
+            disc_pct = flt(item.get("discount_percentage", 0))
+            disc_amt = flt(item.get("discount_amount", 0))
+            if disc_pct and price_list_rate:
+                discount_percentage = disc_pct
+                discount_amount = (price_list_rate * disc_pct) / 100
+            elif disc_amt and price_list_rate:
+                discount_amount = disc_amt
+                discount_percentage = (disc_amt / price_list_rate) * 100
+            else:
+                discount_percentage = 0
+                discount_amount = 0
+            discounted_rate = price_list_rate - discount_amount
+
+            item_data = {
+                "item_code": item_code, "qty": qty, "uom": uom,
+                "description": description,
+                "warehouse": sales_person_details.warehouse,
+                "cost_center": sales_person_details.cost_center,
+                "discount_percentage": discount_percentage,
+                "discount_amount": discount_amount,
+                "rate": discounted_rate,
+                "price_list_rate": price_list_rate,
+                "is_free_item": is_free_item,
+            }
+            # SO linkage if provided
+            if item.get("against_sales_order"):
+                item_data["against_sales_order"] = item.get("against_sales_order")
+            if item.get("so_detail"):
+                item_data["so_detail"] = item.get("so_detail")
+            batch_no = item.get("batch_no")
+            if batch_no:
+                item_data["use_serial_batch_fields"] = 1
+                item_data["batch_no"] = batch_no
+
+            dn.append("items", item_data)
+            response_items.append({
+                "item_code": item_code, "qty": qty, "uom": uom,
+                "rate": discounted_rate, "price_list_rate": price_list_rate,
+                "discount_percentage": discount_percentage, "discount_amount": discount_amount,
+                "is_free_item": is_free_item,
+            })
+
+        frappe.flags.ignore_permissions = True
+        dn.run_method("set_missing_values")
+        frappe.flags.ignore_permissions = False
+
+        if additional_discount_amount:
+            dn.apply_discount_on = "Net Total"
+            dn.discount_amount = additional_discount_amount
+
+        dn.run_method("calculate_taxes_and_totals")
+
+        if params.get("po_no"):
+            dn.po_no = params.get("po_no")
+        if params.get("remarks"):
+            dn.remarks = params.get("remarks")
+
+        if hasattr(dn, 'sales_team'):
+            dn.append("sales_team", {"sales_person": sales_person, "allocated_percentage": 100})
+
+        dn.insert(ignore_permissions=True)
+        frappe.db.commit()
+
+        return response(
+            "Delivery Note created successfully",
+            {
+                "name": dn.name, "docstatus": dn.docstatus, "status": dn.status,
+                "customer": dn.customer, "customer_name": dn.customer_name,
+                "posting_date": str(dn.posting_date),
+                "total": dn.total, "grand_total": dn.grand_total,
+                "items": response_items,
+            },
+            True, 200,
+        )
+    except Exception as e:
+        frappe.db.rollback()
+        frappe.log_error(title="Create Delivery Note Error", message=str(e))
+        return response(str(e), {}, False, 500)
+
+
+@frappe.whitelist(methods="POST")
+def update_delivery_note(params):
+    """Update a Draft Delivery Note (replaces items)."""
+    try:
+        if isinstance(params, str):
+            params = json.loads(params)
+
+        dn_name = params.get("name")
+        if not dn_name:
+            return response("Delivery Note name is required", {}, False, 400)
+        if not frappe.db.exists("Delivery Note", dn_name):
+            return response(f"Delivery Note {dn_name} not found", {}, False, 404)
+
+        dn = frappe.get_doc("Delivery Note", dn_name)
+        if dn.docstatus != 0:
+            return response("Can only update Delivery Note in Draft state", {}, False, 400)
+
+        sales_person = frappe.db.get_value("Sales Person", {"custom_user": frappe.session.user}, "name")
+        settings = get_basket4me_settings()
+        sales_person_details = None
+        for detail in settings.sales_person_details:
+            if detail.sales_person == sales_person:
+                sales_person_details = detail
+        if not sales_person_details:
+            return response(f"No Basket4Me Settings found for sales person {sales_person}", {}, False, 400)
+
+        customer = params.get("customer") or dn.customer
+        effective_price_list = get_effective_price_list(customer=customer, sales_person=sales_person)
+        items = params.get("items")
+
+        if params.get("customer"):
+            dn.customer = params["customer"]
+        if params.get("customer_name"):
+            dn.customer_name = params["customer_name"]
+        if params.get("po_no"):
+            dn.po_no = params["po_no"]
+        if params.get("remarks"):
+            dn.remarks = params["remarks"]
+
+        additional_discount_amount = flt(params.get("additional_discount_amount") or 0)
+
+        if items and isinstance(items, list):
+            dn.items = []
+            dn.selling_price_list = effective_price_list
+            for item in items:
+                item_code = item.get("item_code")
+                qty = item.get("qty", 1)
+                uom = item.get("uom")
+                provided_rate = item.get("rate")
+                is_free_item = item.get("is_free_item", False)
+
+                item_price = frappe.db.sql("""
+                    SELECT price_list_rate FROM `tabItem Price`
+                    WHERE item_code = %s AND uom = %s AND price_list = %s
+                    ORDER BY uom DESC, creation DESC LIMIT 1
+                """, (item_code, uom, effective_price_list), as_dict=True)
+                latest = item_price[0]["price_list_rate"] if item_price else None
+                if is_free_item:
+                    rate = 0
+                elif latest is not None:
+                    rate = latest
+                else:
+                    rate = provided_rate
+                price_list_rate = flt(rate)
+                disc_pct = flt(item.get("discount_percentage", 0))
+                disc_amt = flt(item.get("discount_amount", 0))
+                if disc_pct and price_list_rate:
+                    discount_percentage = disc_pct
+                    discount_amount = (price_list_rate * disc_pct) / 100
+                elif disc_amt and price_list_rate:
+                    discount_amount = disc_amt
+                    discount_percentage = (disc_amt / price_list_rate) * 100
+                else:
+                    discount_percentage = 0
+                    discount_amount = 0
+                discounted_rate = price_list_rate - discount_amount
+
+                item_data = {
+                    "item_code": item_code, "qty": qty, "uom": uom,
+                    "warehouse": sales_person_details.warehouse,
+                    "cost_center": sales_person_details.cost_center,
+                    "discount_percentage": discount_percentage,
+                    "discount_amount": discount_amount,
+                    "rate": discounted_rate,
+                    "price_list_rate": price_list_rate,
+                    "is_free_item": is_free_item,
+                }
+                if item.get("against_sales_order"):
+                    item_data["against_sales_order"] = item["against_sales_order"]
+                if item.get("so_detail"):
+                    item_data["so_detail"] = item["so_detail"]
+                batch_no = item.get("batch_no")
+                if batch_no:
+                    item_data["use_serial_batch_fields"] = 1
+                    item_data["batch_no"] = batch_no
+                dn.append("items", item_data)
+
+        frappe.flags.ignore_permissions = True
+        dn.run_method("set_missing_values")
+        frappe.flags.ignore_permissions = False
+        if additional_discount_amount:
+            dn.apply_discount_on = "Net Total"
+            dn.discount_amount = additional_discount_amount
+        dn.run_method("calculate_taxes_and_totals")
+        dn.save(ignore_permissions=True)
+        frappe.db.commit()
+
+        return response(
+            "Delivery Note updated successfully",
+            {
+                "name": dn.name, "docstatus": dn.docstatus,
+                "customer": dn.customer, "total": dn.total, "grand_total": dn.grand_total,
+                "items": [{"item_code": i.item_code, "item_name": i.item_name, "qty": i.qty, "rate": i.rate, "amount": i.amount} for i in dn.items],
+            },
+            True, 200,
+        )
+    except Exception as e:
+        frappe.db.rollback()
+        frappe.log_error(title="Update Delivery Note Error", message=str(e))
+        return response(str(e), {}, False, 500)
+
+
+@frappe.whitelist(methods="POST")
+def submit_delivery_note(params):
+    """Submit a Draft Delivery Note."""
+    try:
+        if isinstance(params, str):
+            params = json.loads(params)
+        dn_name = params.get("name")
+        if not dn_name:
+            return response("Delivery Note name is required", {}, False, 400)
+        if not frappe.db.exists("Delivery Note", dn_name):
+            return response(f"Delivery Note {dn_name} not found", {}, False, 404)
+        dn = frappe.get_doc("Delivery Note", dn_name)
+        if dn.docstatus != 0:
+            return response("Delivery Note is not in Draft state", {}, False, 400)
+        dn.submit()
+        frappe.db.commit()
+        return response("Delivery Note submitted", {"name": dn.name, "docstatus": dn.docstatus, "status": dn.status, "grand_total": dn.grand_total}, True, 200)
+    except Exception as e:
+        frappe.db.rollback()
+        frappe.log_error(title="Submit Delivery Note Error", message=str(e))
+        return response(str(e), {}, False, 500)
+
+
+@frappe.whitelist(methods="POST")
+def cancel_delivery_note(params):
+    """Cancel a submitted Delivery Note."""
+    try:
+        if isinstance(params, str):
+            params = json.loads(params)
+        dn_name = params.get("name")
+        if not dn_name:
+            return response("Delivery Note name is required", {}, False, 400)
+        if not frappe.db.exists("Delivery Note", dn_name):
+            return response(f"Delivery Note {dn_name} not found", {}, False, 404)
+        dn = frappe.get_doc("Delivery Note", dn_name)
+        if dn.docstatus != 1:
+            return response("Only submitted Delivery Notes can be cancelled", {}, False, 400)
+        dn.cancel()
+        frappe.db.commit()
+        return response("Delivery Note cancelled", {"name": dn.name, "docstatus": dn.docstatus, "status": dn.status}, True, 200)
+    except Exception as e:
+        frappe.db.rollback()
+        frappe.log_error(title="Cancel Delivery Note Error", message=str(e))
+        return response(str(e), {}, False, 500)
+
+
+@frappe.whitelist(methods="POST")
+def delete_delivery_note(params):
+    """Delete a Draft or Cancelled Delivery Note."""
+    try:
+        if isinstance(params, str):
+            params = json.loads(params)
+        dn_name = params.get("name")
+        if not dn_name:
+            return response("Delivery Note name is required", {}, False, 400)
+        if not frappe.db.exists("Delivery Note", dn_name):
+            return response(f"Delivery Note {dn_name} not found", {}, False, 404)
+        dn = frappe.get_doc("Delivery Note", dn_name)
+        if dn.docstatus == 1:
+            return response("Cannot delete submitted Delivery Note. Cancel first.", {}, False, 400)
+        frappe.delete_doc("Delivery Note", dn_name, ignore_permissions=True)
+        frappe.db.commit()
+        return response(f"Delivery Note {dn_name} deleted", {}, True, 200)
+    except Exception as e:
+        frappe.db.rollback()
+        frappe.log_error(title="Delete Delivery Note Error", message=str(e))
+        return response(str(e), {}, False, 500)
+
+
+@frappe.whitelist(methods="GET")
+def get_delivery_note_list(name=None, customer=None, status=None, search=None,
+                           from_date=None, to_date=None, limit_start=0, limit_page_length=20):
+    """List Delivery Notes with filters."""
+    try:
+        filters = {}
+        if name:
+            filters["name"] = name
+        if customer:
+            filters["customer"] = customer
+        if status:
+            if status == "Draft":
+                filters["docstatus"] = 0
+            elif status == "Cancelled":
+                filters["docstatus"] = 2
+            else:
+                filters["docstatus"] = 1
+                if status != "Submitted":
+                    filters["status"] = status
+        if from_date and to_date:
+            filters["posting_date"] = ["between", [from_date, to_date]]
+        elif from_date:
+            filters["posting_date"] = [">=", from_date]
+        elif to_date:
+            filters["posting_date"] = ["<=", to_date]
+
+        or_filters = None
+        if search:
+            or_filters = [["name", "like", f"%{search}%"], ["customer_name", "like", f"%{search}%"]]
+
+        dns = frappe.get_all(
+            "Delivery Note", filters=filters, or_filters=or_filters,
+            fields=["name", "customer", "customer_name", "posting_date", "docstatus",
+                     "status", "total", "grand_total", "currency", "per_billed"],
+            order_by="creation desc",
+            limit_start=int(limit_start), limit_page_length=int(limit_page_length),
+        )
+        total_count = frappe.db.count("Delivery Note", filters=filters)
+
+        # Summaries
+        total_value = sum(d["grand_total"] or 0 for d in dns)
+        total_customers = len(set(d["customer"] for d in dns))
+
+        for d in dns:
+            d["items"] = frappe.get_all("Delivery Note Item", filters={"parent": d["name"]},
+                fields=["item_code", "item_name", "qty", "uom", "rate", "amount"])
+
+        return response("Delivery Notes fetched", {
+            "delivery_notes": dns, "total_count": total_count,
+            "total_value": total_value, "total_customers": total_customers,
+        }, True, 200)
+    except Exception as e:
+        frappe.log_error(title="Get Delivery Note List Error", message=str(e))
+        return response(str(e), {}, False, 500)
+
+
+@frappe.whitelist(methods="GET")
+def get_delivery_note_detail(name=None):
+    """Get single Delivery Note with full details."""
+    try:
+        if not name:
+            return response("Delivery Note name is required", {}, False, 400)
+        if not frappe.db.exists("Delivery Note", name):
+            return response(f"Delivery Note {name} not found", {}, False, 404)
+
+        dn = frappe.get_doc("Delivery Note", name)
+        return response("Delivery Note fetched", {
+            "name": dn.name, "customer": dn.customer, "customer_name": dn.customer_name,
+            "posting_date": str(dn.posting_date), "docstatus": dn.docstatus,
+            "status": dn.status, "company": dn.company, "currency": dn.currency,
+            "selling_price_list": dn.selling_price_list,
+            "total": dn.total, "net_total": dn.net_total,
+            "grand_total": dn.grand_total, "per_billed": dn.per_billed,
+            "items": [{
+                "name": i.name, "item_code": i.item_code, "item_name": i.item_name,
+                "qty": i.qty, "uom": i.uom, "rate": i.rate,
+                "price_list_rate": i.price_list_rate,
+                "discount_percentage": i.discount_percentage,
+                "discount_amount": i.discount_amount,
+                "amount": i.amount, "warehouse": i.warehouse,
+                "against_sales_order": i.against_sales_order,
+                "so_detail": i.so_detail,
+            } for i in dn.items],
+            "taxes": [{
+                "charge_type": t.charge_type, "account_head": t.account_head,
+                "description": t.description, "rate": t.rate,
+                "tax_amount": t.tax_amount, "total": t.total,
+                "included_in_print_rate": t.included_in_print_rate,
+            } for t in dn.taxes] if dn.taxes else [],
+        }, True, 200)
+    except Exception as e:
+        frappe.log_error(title="Get Delivery Note Detail Error", message=str(e))
+        return response(str(e), {}, False, 500)
+
+
+# ==================== CONVERSION APIs ====================
+
+@frappe.whitelist(methods="GET")
+def get_pending_so_for_dn(customer=None):
+    """
+    Get submitted Sales Orders that are pending delivery for a customer.
+    Returns SOs where per_delivered < 100.
+    """
+    try:
+        if not customer:
+            return response("Customer is required", {}, False, 400)
+
+        sos = frappe.get_all(
+            "Sales Order",
+            filters={"customer": customer, "docstatus": 1, "per_delivered": ["<", 100], "status": ["not in", ["Cancelled", "Closed"]]},
+            fields=["name", "customer", "customer_name", "transaction_date", "delivery_date",
+                     "status", "total", "grand_total", "per_delivered", "per_billed"],
+            order_by="transaction_date desc",
+        )
+
+        for so in sos:
+            so["items"] = frappe.get_all(
+                "Sales Order Item",
+                filters={"parent": so["name"]},
+                fields=["name", "item_code", "item_name", "qty", "delivered_qty",
+                         "uom", "rate", "amount", "warehouse"],
+            )
+            # Calculate pending qty
+            for item in so["items"]:
+                item["pending_qty"] = flt(item["qty"]) - flt(item["delivered_qty"])
+
+        return response("Pending Sales Orders for delivery", {"sales_orders": sos}, True, 200)
+    except Exception as e:
+        frappe.log_error(title="Get Pending SO for DN Error", message=str(e))
+        return response(str(e), {}, False, 500)
+
+
+@frappe.whitelist(methods="POST")
+def create_dn_from_so(params):
+    """
+    Create Delivery Note from one or more Sales Orders.
+    Draft SOs will be submitted first.
+
+    Args (via params):
+        sales_orders: list of SO names (required)
+    """
+    try:
+        if isinstance(params, str):
+            params = json.loads(params)
+
+        sales_orders = params.get("sales_orders")
+        if not sales_orders or not isinstance(sales_orders, list):
+            return response("sales_orders list is required", {}, False, 400)
+
+        sales_person = frappe.db.get_value("Sales Person", {"custom_user": frappe.session.user}, "name")
+        settings = get_basket4me_settings()
+        sp_detail = None
+        for d in settings.sales_person_details:
+            if d.sales_person == sales_person:
+                sp_detail = d
+                break
+        if not sp_detail:
+            return response(f"No settings for sales person {sales_person}", {}, False, 400)
+
+        first_so = frappe.get_doc("Sales Order", sales_orders[0])
+
+        # Validate & submit drafts
+        for so_name in sales_orders:
+            so = frappe.get_doc("Sales Order", so_name)
+            if so.customer != first_so.customer:
+                return response(f"All SOs must belong to same customer. {so_name} differs.", {}, False, 400)
+            if so.per_delivered >= 100:
+                return response(f"SO {so_name} is already fully delivered", {}, False, 400)
+            if so.docstatus == 0:
+                so.submit()
+
+        dn = frappe.new_doc("Delivery Note")
+        dn.customer = first_so.customer
+        dn.company = sp_detail.company
+        dn.posting_date = nowdate()
+        dn.set_warehouse = sp_detail.warehouse
+        dn.cost_center = sp_detail.cost_center
+        dn.selling_price_list = first_so.selling_price_list
+        dn.custom_mobile_app = 1
+
+        for tax in first_so.taxes or []:
+            dn.append("taxes", {
+                "charge_type": tax.charge_type, "account_head": tax.account_head,
+                "description": tax.description, "rate": tax.rate,
+                "cost_center": tax.cost_center,
+                "included_in_print_rate": tax.included_in_print_rate,
+                "tax_amount": tax.tax_amount if tax.charge_type == "Actual" else 0,
+            })
+
+        for so_name in sales_orders:
+            so = frappe.get_doc("Sales Order", so_name)
+            for item in so.items:
+                pending = flt(item.qty) - flt(item.delivered_qty)
+                if pending <= 0:
+                    continue
+                dn.append("items", {
+                    "item_code": item.item_code, "item_name": item.item_name,
+                    "description": item.description, "qty": pending,
+                    "uom": item.uom, "rate": item.rate,
+                    "price_list_rate": item.price_list_rate,
+                    "discount_percentage": item.discount_percentage,
+                    "discount_amount": item.discount_amount,
+                    "warehouse": item.warehouse or sp_detail.warehouse,
+                    "cost_center": sp_detail.cost_center,
+                    "against_sales_order": so.name,
+                    "so_detail": item.name,
+                })
+
+        if hasattr(dn, 'sales_team'):
+            dn.append("sales_team", {"sales_person": sales_person, "allocated_percentage": 100})
+
+        dn.insert(ignore_permissions=True)
+        frappe.db.commit()
+
+        return response("Delivery Note created from SO(s)", {
+            "name": dn.name, "sales_orders_linked": sales_orders,
+            "customer": dn.customer, "grand_total": dn.grand_total,
+            "items": [{"item_code": i.item_code, "qty": i.qty, "rate": i.rate, "amount": i.amount, "against_sales_order": i.against_sales_order} for i in dn.items],
+        }, True, 200)
+    except Exception as e:
+        frappe.db.rollback()
+        frappe.log_error(title="Create DN from SO Error", message=str(e))
+        return response(str(e), {}, False, 500)
+
+
+@frappe.whitelist(methods="GET")
+def get_uninvoiced_dn(customer=None):
+    """
+    Get submitted Delivery Notes that are not yet invoiced (per_billed < 100).
+    """
+    try:
+        if not customer:
+            return response("Customer is required", {}, False, 400)
+
+        dns = frappe.get_all(
+            "Delivery Note",
+            filters={"customer": customer, "docstatus": 1, "per_billed": ["<", 100], "status": ["not in", ["Cancelled", "Closed"]]},
+            fields=["name", "customer", "customer_name", "posting_date", "status",
+                     "total", "grand_total", "per_billed"],
+            order_by="posting_date desc",
+        )
+
+        for d in dns:
+            d["items"] = frappe.get_all(
+                "Delivery Note Item",
+                filters={"parent": d["name"]},
+                fields=["name", "item_code", "item_name", "qty", "billed_amt",
+                         "uom", "rate", "amount", "against_sales_order", "so_detail"],
+            )
+
+        return response("Uninvoiced Delivery Notes", {"delivery_notes": dns}, True, 200)
+    except Exception as e:
+        frappe.log_error(title="Get Uninvoiced DN Error", message=str(e))
+        return response(str(e), {}, False, 500)
+
+
+@frappe.whitelist(methods="POST")
+def create_si_from_dn(params):
+    """
+    Create Sales Invoice from one or more submitted Delivery Notes.
+
+    Args (via params):
+        delivery_notes: list of DN names (required)
+        payments: list of {"mode_of_payment", "amount"} (optional)
+    """
+    try:
+        if isinstance(params, str):
+            params = json.loads(params)
+
+        delivery_notes = params.get("delivery_notes")
+        payments = params.get("payments")
+        if not delivery_notes or not isinstance(delivery_notes, list):
+            return response("delivery_notes list is required", {}, False, 400)
+
+        sales_person = frappe.db.get_value("Sales Person", {"custom_user": frappe.session.user}, "name")
+        settings = get_basket4me_settings()
+        sp_detail = None
+        for d in settings.sales_person_details:
+            if d.sales_person == sales_person:
+                sp_detail = d
+                break
+        if not sp_detail:
+            return response(f"No settings for sales person {sales_person}", {}, False, 400)
+
+        first_dn = frappe.get_doc("Delivery Note", delivery_notes[0])
+
+        for dn_name in delivery_notes:
+            dn = frappe.get_doc("Delivery Note", dn_name)
+            if dn.docstatus != 1:
+                return response(f"DN {dn_name} is not submitted", {}, False, 400)
+            if dn.customer != first_dn.customer:
+                return response(f"All DNs must belong to same customer", {}, False, 400)
+            if dn.per_billed >= 100:
+                return response(f"DN {dn_name} is already fully billed", {}, False, 400)
+
+        si = frappe.new_doc("Sales Invoice")
+        si.customer = first_dn.customer
+        si.company = sp_detail.company
+        si.posting_date = nowdate()
+        si.due_date = nowdate()
+        si.currency = first_dn.currency
+        si.selling_price_list = first_dn.selling_price_list
+        si.cost_center = sp_detail.cost_center
+        si.update_stock = 0  # Stock already reduced by DN
+        si.custom_mobile_app = 1
+
+        for tax in first_dn.taxes or []:
+            si.append("taxes", {
+                "charge_type": tax.charge_type, "account_head": tax.account_head,
+                "description": tax.description, "rate": tax.rate,
+                "cost_center": tax.cost_center,
+                "included_in_print_rate": tax.included_in_print_rate,
+                "tax_amount": tax.tax_amount if tax.charge_type == "Actual" else 0,
+            })
+
+        for dn_name in delivery_notes:
+            dn = frappe.get_doc("Delivery Note", dn_name)
+            for item in dn.items:
+                si.append("items", {
+                    "item_code": item.item_code, "item_name": item.item_name,
+                    "description": item.description, "qty": item.qty,
+                    "uom": item.uom, "rate": item.rate,
+                    "price_list_rate": item.price_list_rate,
+                    "discount_percentage": item.discount_percentage,
+                    "discount_amount": item.discount_amount,
+                    "warehouse": item.warehouse,
+                    "cost_center": sp_detail.cost_center,
+                    "delivery_note": dn.name,
+                    "dn_detail": item.name,
+                    "sales_order": item.against_sales_order,
+                    "so_detail": item.so_detail,
+                })
+
+        if payments and isinstance(payments, list):
+            for p in payments:
+                si.append("payments", {"mode_of_payment": p.get("mode_of_payment"), "amount": p.get("amount", 0)})
+
+        si.append("sales_team", {"sales_person": sales_person, "allocated_percentage": 100})
+
+        si.insert(ignore_permissions=True)
+        si.submit()
+        frappe.db.commit()
+
+        return response("Sales Invoice created from DN(s)", {
+            "sales_invoice": si.name, "delivery_notes_linked": delivery_notes,
+            "customer": si.customer, "grand_total": si.grand_total, "docstatus": si.docstatus,
+            "items": [{"item_code": i.item_code, "qty": i.qty, "rate": i.rate, "amount": i.amount, "delivery_note": i.delivery_note} for i in si.items],
+        }, True, 200)
+    except Exception as e:
+        frappe.db.rollback()
+        frappe.log_error(title="Create SI from DN Error", message=str(e))
+        return response(str(e), {}, False, 500)
+
+
+@frappe.whitelist(methods="GET")
+def get_invoices_for_return(customer=None):
+    """
+    Get submitted Sales Invoices (non-return) for a customer that can be used for return.
+    """
+    try:
+        if not customer:
+            return response("Customer is required", {}, False, 400)
+
+        invoices = frappe.get_all(
+            "Sales Invoice",
+            filters={"customer": customer, "docstatus": 1, "is_return": 0, "status": ["not in", ["Cancelled"]]},
+            fields=["name", "customer", "customer_name", "posting_date", "status",
+                     "total", "grand_total", "outstanding_amount"],
+            order_by="posting_date desc",
+        )
+
+        for inv in invoices:
+            inv["items"] = frappe.get_all(
+                "Sales Invoice Item",
+                filters={"parent": inv["name"]},
+                fields=["name", "item_code", "item_name", "qty", "uom", "rate", "amount"],
+            )
+            # Get already returned qty
+            for item in inv["items"]:
+                returned = frappe.db.sql("""
+                    SELECT COALESCE(SUM(ABS(sii.qty)), 0)
+                    FROM `tabSales Invoice Item` sii
+                    JOIN `tabSales Invoice` si ON sii.parent = si.name
+                    WHERE si.is_return = 1 AND si.docstatus = 1
+                    AND si.return_against = %s AND sii.item_code = %s
+                """, (inv["name"], item["item_code"]))[0][0] or 0
+                item["returned_qty"] = returned
+                item["returnable_qty"] = flt(item["qty"]) - flt(returned)
+
+        return response("Invoices for return", {"invoices": invoices}, True, 200)
+    except Exception as e:
+        frappe.log_error(title="Get Invoices For Return Error", message=str(e))
+        return response(str(e), {}, False, 500)
+
+
+@frappe.whitelist(methods="GET")
+def get_territories():
+    """Get list of territories (routes) for filtering."""
+    try:
+        territories = frappe.get_all(
+            "Territory",
+            filters={"is_group": 0},
+            fields=["name", "parent_territory"],
+            order_by="name asc",
+        )
+        return response("Territories fetched", {"territories": territories}, True, 200)
+    except Exception as e:
+        return response(str(e), {}, False, 500)
+
