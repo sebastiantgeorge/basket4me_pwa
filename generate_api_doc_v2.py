@@ -173,7 +173,7 @@ for label, value in [
     ("Base URL: ", BASE_URL),
     ("\nVersion: ", "2.0"),
     ("\nDate: ", "March 2026"),
-    ("\nAuthorization: ", "Cookie-based (sid + CSRF Token)"),
+    ("\nAuthorization: ", "Token-based (api_key:api_secret)"),
 ]:
     r_l = info_p.add_run(label)
     r_l.bold = True
@@ -221,19 +221,39 @@ doc.add_page_break()
 doc.add_heading("Authentication & Authorization", level=1)
 
 doc.add_paragraph(
-    "The Basket4Me PWA API uses cookie-based authentication. "
-    "The Login endpoint returns a session ID (sid) and a CSRF token. "
-    "These must be included in all subsequent requests as described below."
+    "The Basket4Me PWA API supports two authentication methods. "
+    "Token-based authentication is recommended for PWA/mobile apps."
 )
 
-doc.add_heading("How It Works", level=2)
+doc.add_heading("Method 1: Token Authentication (Recommended for PWA)", level=2)
 doc.add_paragraph(
     "1. Call the Login endpoint with usr and pwd.\n"
-    "2. The response contains sid and csrf_token.\n"
-    "3. Store both values on the client for all future requests."
+    "2. The response contains api_key and api_secret.\n"
+    "3. Store both values in local storage.\n"
+    "4. Include in ALL subsequent requests as a single header."
 )
 
-doc.add_heading("Required Headers by Method", level=2)
+make_table(
+    ["Header", "Format", "Example"],
+    [
+        ["Authorization", "token <api_key>:<api_secret>", "Authorization: token c12a33bb670b1e1:80c7720caff3272"],
+    ],
+)
+
+doc.add_paragraph()
+p_note = doc.add_paragraph()
+run_note = p_note.add_run("Important: ")
+run_note.bold = True
+p_note.add_run(
+    "Token auth works for both GET and POST requests. No Cookie or CSRF token headers needed. "
+    "This avoids the browser 'Refused to set unsafe header Cookie' error in PWA/frontend apps."
+)
+
+doc.add_heading("Method 2: Cookie Authentication (Alternative)", level=2)
+doc.add_paragraph(
+    "Use sid (Cookie) and csrf_token (X-Frappe-CSRF-Token) from the login response. "
+    "Note: Browsers may block setting the Cookie header directly. Use Token auth instead."
+)
 
 make_table(
     ["HTTP Method", "Required Headers", "Example"],
@@ -242,15 +262,6 @@ make_table(
         ["POST", "Cookie: sid=<session_id>\nX-Frappe-CSRF-Token: <token>",
          "Cookie: sid=abc123xyz\nX-Frappe-CSRF-Token: tok456"],
     ],
-)
-
-doc.add_paragraph()
-p_note = doc.add_paragraph()
-run_note = p_note.add_run("Note: ")
-run_note.bold = True
-p_note.add_run(
-    "All POST requests MUST include the X-Frappe-CSRF-Token header in addition to the Cookie header. "
-    "GET requests only need the Cookie header. Omitting these headers will result in a 403 Forbidden error."
 )
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -703,39 +714,59 @@ add_endpoint_detail(
         {"name": "custom_payment_type", "type": "String", "required": "No", "desc": "Payment type (Cash/Credit)"},
     ],
     request_body={
-        "customer": "CUST-0001",
-        "delivery_date": "2026-03-20",
-        "po_no": "PO-2026-100",
-        "remarks": "Urgent delivery required",
-        "custom_payment_type": "Cash",
-        "items": [
-            {
-                "item_code": "ITEM-001",
-                "qty": 24,
-                "uom": "Nos",
-                "rate": 2.50,
-                "discount_percentage": 0,
-                "discount_amount": 0,
-                "is_free_item": 0,
-                "batch_no": "BATCH-001"
-            },
-            {
-                "item_code": "ITEM-002",
-                "qty": 1,
-                "uom": "Box",
-                "rate": 50.00,
-                "is_free_item": 0
-            }
-        ]
+        "params": {
+            "customer": "CUST-0001",
+            "delivery_date": "2026-03-20",
+            "po_no": "PO-2026-100",
+            "remarks": "Urgent delivery required",
+            "custom_payment_type": "Cash",
+            "items": [
+                {
+                    "item_code": "ITEM-001",
+                    "qty": 24,
+                    "uom": "Nos",
+                    "rate": 2.50,
+                    "discount_percentage": 0,
+                    "discount_amount": 0,
+                    "is_free_item": 0,
+                    "batch_no": "BATCH-001"
+                },
+                {
+                    "item_code": "ITEM-002",
+                    "qty": 1,
+                    "uom": "Box",
+                    "rate": 50.00,
+                    "is_free_item": 0
+                }
+            ]
+        }
     },
     response_body={
-        "message": {
-            "name": "SO-2026-00045",
+        "message": "Sales Order created successfully",
+        "data": {
+            "name": "DA-SO-2026-01459",
+            "docstatus": 0,
             "status": "Draft",
             "customer": "CUST-0001",
-            "grand_total": 110.00,
-            "delivery_date": "2026-03-20"
-        }
+            "customer_name": "Vimal Store Cherthala",
+            "posting_date": "2026-03-17",
+            "delivery_date": "2026-03-20",
+            "total": 213.60,
+            "grand_total": 213.60,
+            "items": [
+                {
+                    "item_code": "ITEM-001",
+                    "qty": 24,
+                    "uom": "Nos",
+                    "rate": 2.50,
+                    "price_list_rate": 2.50,
+                    "discount_amount": 0,
+                    "discount_percentage": 0,
+                    "is_free_item": False
+                }
+            ]
+        },
+        "success": True
     },
 )
 
@@ -836,32 +867,92 @@ add_endpoint_detail(
         {"name": "payments", "type": "Array", "required": "No", "desc": "Payment details for the invoice"},
     ],
     request_body={
-        "sales_orders": ["SO-2026-00045", "SO-2026-00046"],
-        "payments": [
-            {"mode_of_payment": "Cash", "amount": 200.00},
-            {"mode_of_payment": "Credit", "amount": 50.00}
-        ]
+        "params": {
+            "sales_orders": ["DA-SO-2026-01459", "DA-SO-2026-01460"],
+            "payments": [
+                {"mode_of_payment": "Cash", "amount": 200.00},
+                {"mode_of_payment": "Credit", "amount": 50.00}
+            ]
+        }
     },
     response_body={
-        "message": {
-            "sales_invoice": "SINV-2026-00030",
-            "status": "Draft",
-            "grand_total": 250.00
-        }
+        "message": "Sales Invoice created from Sales Order(s)",
+        "data": {
+            "sales_invoice": "DA-A2526-14448",
+            "sales_orders_linked": ["DA-SO-2026-01459", "DA-SO-2026-01460"],
+            "customer": "Vimal Store Cherthala",
+            "customer_name": "Vimal Store Cherthala",
+            "grand_total": 213.60,
+            "docstatus": 1,
+            "items": [
+                {
+                    "item_code": "AF00890",
+                    "item_name": "B Unibic Cashew Rs.10*192",
+                    "qty": 2.0,
+                    "rate": 106.80,
+                    "amount": 213.60,
+                    "sales_order": "DA-SO-2026-01459"
+                }
+            ]
+        },
+        "success": True
     },
 )
 
-doc.add_heading("5.5 Submit / Cancel / Delete Sales Order", level=2)
-doc.add_paragraph(
-    "These endpoints accept the sales order name and perform the respective action."
+doc.add_heading("5.5 Submit Sales Order", level=2)
+add_endpoint_detail(
+    API_PREFIX + "submit_sales_order", "POST",
+    "Submit a draft sales order.",
+    request_body={"params": {"name": "DA-SO-2026-01459"}},
+    response_body={
+        "message": "Sales Order submitted successfully",
+        "data": {"name": "DA-SO-2026-01459", "docstatus": 1, "status": "To Deliver and Bill", "grand_total": 213.60},
+        "success": True
+    },
 )
-make_table(
-    ["Endpoint", "Method", "Parameter", "Description"],
-    [
-        [API_PREFIX + "submit_sales_order", "POST", "name (String)", "Submit a draft SO"],
-        [API_PREFIX + "cancel_sales_order", "POST", "name (String)", "Cancel a submitted SO"],
-        [API_PREFIX + "delete_sales_order", "POST", "name (String)", "Permanently delete a draft SO"],
-    ],
+
+doc.add_heading("5.6 Update Sales Order (Draft only)", level=2)
+add_endpoint_detail(
+    API_PREFIX + "update_sales_order", "POST",
+    "Update an existing draft sales order. Only works on draft (docstatus=0) orders.",
+    request_body={
+        "params": {
+            "name": "DA-SO-2026-01459",
+            "delivery_date": "2026-03-25",
+            "items": [
+                {"item_code": "AF00890", "qty": 5, "uom": "Nos", "rate": 106.80}
+            ]
+        }
+    },
+    response_body={
+        "message": "Sales Order updated successfully",
+        "data": {"name": "DA-SO-2026-01459", "status": "Draft", "grand_total": 534.00},
+        "success": True
+    },
+)
+
+doc.add_heading("5.7 Cancel Sales Order", level=2)
+add_endpoint_detail(
+    API_PREFIX + "cancel_sales_order", "POST",
+    "Cancel a submitted sales order.",
+    request_body={"params": {"name": "DA-SO-2026-01459"}},
+    response_body={
+        "message": "Sales Order cancelled successfully",
+        "data": {"name": "DA-SO-2026-01459", "docstatus": 2, "status": "Cancelled"},
+        "success": True
+    },
+)
+
+doc.add_heading("5.8 Delete Sales Order (Draft only)", level=2)
+add_endpoint_detail(
+    API_PREFIX + "delete_sales_order", "POST",
+    "Permanently delete a draft sales order.",
+    request_body={"params": {"name": "DA-SO-2026-01459"}},
+    response_body={
+        "message": "Sales Order deleted successfully",
+        "data": {},
+        "success": True
+    },
 )
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -894,12 +985,14 @@ add_endpoint_detail(
         {"name": "posting_date", "type": "Date", "required": "No", "desc": "Posting date"},
     ],
     request_body={
-        "customer": "CUST-0001",
-        "posting_date": "2026-03-16",
-        "items": [
-            {"item_code": "ITEM-001", "qty": 24, "uom": "Nos", "rate": 2.50},
-            {"item_code": "ITEM-002", "qty": 1, "uom": "Box", "rate": 50.00}
-        ]
+        "params": {
+            "customer": "CUST-0001",
+            "posting_date": "2026-03-16",
+            "items": [
+                {"item_code": "ITEM-001", "qty": 24, "uom": "Nos", "rate": 2.50},
+                {"item_code": "ITEM-002", "qty": 1, "uom": "Box", "rate": 50.00}
+            ]
+        }
     },
     response_body={
         "message": {
@@ -969,7 +1062,7 @@ add_endpoint_detail(
     params=[
         {"name": "sales_orders", "type": "Array", "required": "Yes", "desc": "List of SO names"},
     ],
-    request_body={"sales_orders": ["SO-2026-00045"]},
+    request_body={"params": {"sales_orders": ["SO-2026-00045"]}},
     response_body={
         "message": {
             "name": "DN-2026-00021",
@@ -988,8 +1081,10 @@ add_endpoint_detail(
         {"name": "payments", "type": "Array", "required": "No", "desc": "Payment details"},
     ],
     request_body={
-        "delivery_notes": ["DN-2026-00020"],
-        "payments": [{"mode_of_payment": "Cash", "amount": 110.00}]
+        "params": {
+            "delivery_notes": ["DN-2026-00020"],
+            "payments": [{"mode_of_payment": "Cash", "amount": 110.00}]
+        }
     },
     response_body={
         "message": {
@@ -1042,17 +1137,19 @@ add_endpoint_detail(
         {"name": "due_date", "type": "Date", "required": "No", "desc": "Payment due date"},
     ],
     request_body={
-        "customer": "CUST-0001",
-        "posting_date": "2026-03-16",
-        "due_date": "2026-04-15",
-        "items": [
-            {"item_code": "ITEM-001", "qty": 24, "uom": "Nos", "rate": 2.50},
-            {"item_code": "ITEM-002", "qty": 1, "uom": "Box", "rate": 50.00}
-        ],
-        "payments": [
-            {"mode_of_payment": "Cash", "amount": 60.00},
-            {"mode_of_payment": "Credit", "amount": 50.00}
-        ]
+        "params": {
+            "customer": "CUST-0001",
+            "posting_date": "2026-03-16",
+            "due_date": "2026-04-15",
+            "items": [
+                {"item_code": "ITEM-001", "qty": 24, "uom": "Nos", "rate": 2.50},
+                {"item_code": "ITEM-002", "qty": 1, "uom": "Box", "rate": 50.00}
+            ],
+            "payments": [
+                {"mode_of_payment": "Cash", "amount": 60.00},
+                {"mode_of_payment": "Credit", "amount": 50.00}
+            ]
+        }
     },
     response_body={
         "message": {
@@ -1179,11 +1276,13 @@ add_endpoint_detail(
         {"name": "items[].uom", "type": "String", "required": "No", "desc": "Unit of measure"},
     ],
     request_body={
-        "return_against": "SINV-2026-00032",
-        "items": [
-            {"item_code": "ITEM-001", "qty": -5, "uom": "Nos"},
-            {"item_code": "ITEM-002", "qty": -1, "uom": "Box"}
-        ]
+        "params": {
+            "return_against": "SINV-2026-00032",
+            "items": [
+                {"item_code": "ITEM-001", "qty": -5, "uom": "Nos"},
+                {"item_code": "ITEM-002", "qty": -1, "uom": "Box"}
+            ]
+        }
     },
     response_body={
         "message": {
@@ -1262,16 +1361,18 @@ add_endpoint_detail(
         {"name": "references[].allocated_amount", "type": "Float", "required": "Yes", "desc": "Amount allocated to this invoice"},
     ],
     request_body={
-        "customer": "CUST-0001",
-        "paid_amount": 110.00,
-        "mode_of_payment": "Cash",
-        "references": [
-            {
-                "reference_doctype": "Sales Invoice",
-                "reference_name": "SINV-2026-00032",
-                "allocated_amount": 110.00
-            }
-        ]
+        "params": {
+            "customer": "CUST-0001",
+            "paid_amount": 110.00,
+            "mode_of_payment": "Cash",
+            "references": [
+                {
+                    "reference_doctype": "Sales Invoice",
+                    "reference_name": "SINV-2026-00032",
+                    "allocated_amount": 110.00
+                }
+            ]
+        }
     },
     response_body={
         "message": {
@@ -1290,7 +1391,7 @@ add_endpoint_detail(
     params=[
         {"name": "name", "type": "String", "required": "Yes", "desc": "Payment entry name"},
     ],
-    request_body={"name": "PE-2026-00015"},
+    request_body={"params": {"name": "PE-2026-00015"}},
     response_body={"message": {"name": "PE-2026-00015", "status": "Cancelled"}},
 )
 
