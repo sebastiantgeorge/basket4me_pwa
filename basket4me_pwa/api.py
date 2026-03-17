@@ -7280,7 +7280,8 @@ def get_customer_visits(customer=None, from_date=None, to_date=None):
 
 @frappe.whitelist(methods="GET")
 def get_customer_list_v2(name=None, mobile_no=None, territory=None, route=None,
-                         visit_status=None, limit_start=0, limit_page_length=20):
+                         visit_status=None, page_number=1, page_size=20,
+                         limit_start=None, limit_page_length=None):
     """
     Enhanced customer list with route/territory, visit status, outstanding balance.
 
@@ -7290,9 +7291,18 @@ def get_customer_list_v2(name=None, mobile_no=None, territory=None, route=None,
         territory: Filter by territory (route)
         route: Alias for territory
         visit_status: "visited" | "not_visited" | None (all)
-        limit_start / limit_page_length: Pagination
+        page_number: Page number (default: 1)
+        page_size: Records per page (default: 20)
+        limit_start / limit_page_length: Legacy pagination (overrides page_number/page_size if provided)
     """
     try:
+        # Support both pagination styles
+        _page_size = int(limit_page_length or page_size or 20)
+        if limit_start is not None:
+            _offset = int(limit_start)
+        else:
+            _offset = (int(page_number or 1) - 1) * _page_size
+
         sales_person = frappe.db.get_value("Sales Person", {"custom_user": frappe.session.user}, "name")
         override_enabled = should_override_sales_team()
 
@@ -7328,8 +7338,8 @@ def get_customer_list_v2(name=None, mobile_no=None, territory=None, route=None,
             or_filters=or_filters,
             fields=fields,
             ignore_permissions=override_enabled,
-            limit_start=int(limit_start),
-            limit_page_length=int(limit_page_length),
+            limit_start=_offset,
+            limit_page_length=_page_size,
             order_by="customer_name asc",
         )
 
@@ -7366,10 +7376,15 @@ def get_customer_list_v2(name=None, mobile_no=None, territory=None, route=None,
                     continue
             result.append(c)
 
-        total_count = len(result)
+        total_count = frappe.db.count("Customer", filters=filters or {})
         return response(
             "Customer list fetched",
-            {"customers": result, "total_count": total_count},
+            {
+                "customers": result,
+                "total_count": total_count,
+                "page_number": int(page_number or 1),
+                "page_size": _page_size,
+            },
             True, 200,
         )
     except Exception as e:
