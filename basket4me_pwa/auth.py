@@ -188,6 +188,37 @@ def get_user_details(sid=None, user_id=None):
             if company_logo and not company_logo.startswith("http"):
                 company_logo = frappe.utils.get_url(company_logo)
 
+        # Get doctype permissions for the user
+        doctypes_to_check = [
+            "Sales Order",
+            "Delivery Note",
+            "Sales Invoice",
+            "Payment Entry",
+            "Customer",
+            "Item",
+            "Material Request",
+        ]
+        permissions = {}
+        for dt in doctypes_to_check:
+            try:
+                perm = frappe.permissions.get_doc_permissions(frappe.new_doc(dt), user=user_id)
+                permissions[dt] = {
+                    "read": bool(perm.get("read", 0)),
+                    "create": bool(perm.get("create", 0)),
+                    "write": bool(perm.get("write", 0)),
+                    "submit": bool(perm.get("submit", 0)),
+                    "cancel": bool(perm.get("cancel", 0)),
+                    "delete": bool(perm.get("delete", 0)),
+                    "amend": bool(perm.get("amend", 0)),
+                    "print": bool(perm.get("print", 0)),
+                }
+            except Exception:
+                permissions[dt] = {
+                    "read": False, "create": False, "write": False,
+                    "submit": False, "cancel": False, "delete": False,
+                    "amend": False, "print": False,
+                }
+
         user_data = {
             "sid": sid if sid else frappe.session.sid,
             "api_key": user_doc.api_key,
@@ -200,6 +231,7 @@ def get_user_details(sid=None, user_id=None):
             "company_name": company_name,
             "company_logo": company_logo,
             "employee_id": frappe.get_value("Employee", {'user_id': user_doc.name}),
+            "permissions": permissions,
         }
 
         frappe.local.response["message"] = {
