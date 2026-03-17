@@ -116,35 +116,42 @@ def generate_keys(user):
 
 @frappe.whitelist(methods=["GET", "POST"], allow_guest=True)
 def logout(usr):
-    users_list = ["Administrator"]
-    users = frappe.get_all("User")
-    for user in users:
-        users_list.append(user)
+    if not usr:
+        frappe.local.response["message"] = {
+            "success_key": 0,
+            "message": "Username is required!",
+        }
+        frappe.local.response.http_status_code = 400
+        return
 
-    if usr in users_list:
-        try:
-            logout_manager = frappe.auth.LoginManager()
-            logout_manager.logout(usr)
-            frappe.local.response["message"] = {
-                "success_key": 1,
-                "message": "Logged out successfully!",
-            }
-            frappe.local.response.http_status_code = 200
+    # Find user by email, mobile_no, or username
+    filter_field = "email" if "@" in usr else ("mobile_no" if usr.isdigit() else "username")
+    user_name = frappe.db.get_value("User", {filter_field: usr}, "name")
 
-        except Exception as e:
-            frappe.local.response["message"] = {
-                "success_key": 0,
-                "message": "Error logging out!",
-                "Exception": e,
-            }
-            frappe.local.response.http_status_code = 400
-
-    else:
+    if not user_name:
         frappe.local.response["message"] = {
             "success_key": 0,
             "message": "User not found!",
         }
         frappe.local.response.http_status_code = 404
+        return
+
+    try:
+        logout_manager = frappe.auth.LoginManager()
+        logout_manager.logout()
+        frappe.local.response["message"] = {
+            "success_key": 1,
+            "message": "Logged out successfully!",
+        }
+        frappe.local.response.http_status_code = 200
+
+    except Exception as e:
+        frappe.local.response["message"] = {
+            "success_key": 0,
+            "message": "Error logging out!",
+            "exception": str(e),
+        }
+        frappe.local.response.http_status_code = 400
 
 @frappe.whitelist(methods=["GET", "POST"], allow_guest=True)
 def get_user_details(sid=None, user_id=None):
