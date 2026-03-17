@@ -770,7 +770,64 @@ add_endpoint_detail(
     },
 )
 
-doc.add_heading("5.3 Convert Sales Order to Sales Invoice", level=2)
+doc.add_heading("5.3 Get Sales Order Detail", level=2)
+add_endpoint_detail(
+    API_PREFIX + "get_sales_order_detail", "GET",
+    "Get full details of a single Sales Order including items, taxes, and sales team.",
+    params=[
+        {"name": "name", "type": "String", "required": "Yes", "desc": "Sales Order ID (e.g. SO-2026-00045)"},
+    ],
+    request_body=None,
+    response_body={
+        "message": "Sales Order fetched successfully",
+        "data": {
+            "name": "SO-2026-00045",
+            "customer": "CUST-0001",
+            "customer_name": "Vimal Store Cherthala",
+            "transaction_date": "2026-03-17",
+            "delivery_date": "2026-03-20",
+            "docstatus": 1,
+            "status": "To Deliver and Bill",
+            "company": "Dev Associate",
+            "currency": "INR",
+            "selling_price_list": "Standard Selling",
+            "total": 213.60,
+            "net_total": 213.60,
+            "total_taxes_and_charges": 0,
+            "grand_total": 213.60,
+            "per_delivered": 0,
+            "per_billed": 0,
+            "po_no": None,
+            "items": [
+                {
+                    "name": "row-id-001",
+                    "item_code": "AF00890",
+                    "item_name": "B Unibic Cashew Rs.10*192",
+                    "description": "B Unibic Cashew Rs.10*192",
+                    "qty": 2,
+                    "uom": "Nos",
+                    "rate": 106.80,
+                    "price_list_rate": 106.80,
+                    "discount_percentage": 0,
+                    "discount_amount": 0,
+                    "amount": 213.60,
+                    "warehouse": "Stores - DA",
+                    "delivery_date": "2026-03-20"
+                }
+            ],
+            "taxes": [],
+            "sales_team": [
+                {
+                    "sales_person": "aswathy",
+                    "allocated_percentage": 100
+                }
+            ]
+        },
+        "success": True
+    },
+)
+
+doc.add_heading("5.4 Convert Sales Order to Sales Invoice", level=2)
 add_endpoint_detail(
     API_PREFIX + "convert_so_to_si", "POST",
     "Convert one or more sales orders into a sales invoice with payment entries.",
@@ -794,7 +851,7 @@ add_endpoint_detail(
     },
 )
 
-doc.add_heading("5.4 Submit / Cancel / Delete Sales Order", level=2)
+doc.add_heading("5.5 Submit / Cancel / Delete Sales Order", level=2)
 doc.add_paragraph(
     "These endpoints accept the sales order name and perform the respective action."
 )
