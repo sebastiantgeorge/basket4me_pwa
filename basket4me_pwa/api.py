@@ -4504,6 +4504,58 @@ def get_customer_group_list(name=None):
     
 
 @frappe.whitelist(methods="GET")
+def get_customer_route_list(name=None, route_code=None, today_only=None):
+    """
+    Get list of Customer Routes.
+
+    Query params:
+        name: Search by route code or name
+        route_code: Filter by exact route code
+        today_only: If "1", return only routes scheduled for today
+    """
+    try:
+        filters = {}
+        or_filters = None
+
+        if route_code:
+            filters["route_code"] = route_code
+
+        if name:
+            or_filters = [
+                ["route_code", "like", f"%{name}%"],
+                ["route_name", "like", f"%{name}%"],
+            ]
+
+        routes = frappe.get_all(
+            "Customer Route",
+            filters=filters,
+            or_filters=or_filters,
+            fields=[
+                "name", "route_code", "route_name",
+                "monday", "tuesday", "wednesday", "thursday",
+                "friday", "saturday", "sunday"
+            ],
+            order_by="route_code asc",
+            limit_page_length=0
+        )
+
+        # Filter by today's day if requested
+        if today_only == "1":
+            import datetime
+            day_name = datetime.datetime.now().strftime("%A").lower()
+            routes = [r for r in routes if r.get(day_name)]
+
+        # Add customer count for each route
+        for r in routes:
+            r["customer_count"] = frappe.db.count("Customer", {"custom_route": r["name"]}) or 0
+
+        return response("Customer Routes fetched", {"routes": routes, "total_count": len(routes)}, True, 200)
+    except Exception as e:
+        frappe.log_error(title="Get Customer Route List Error", message=str(e))
+        return response(str(e), {}, False, 500)
+
+
+@frappe.whitelist(methods="GET")
 def get_material_request_list(name=None):
     try:
         filters = {}
@@ -6744,7 +6796,7 @@ def delete_sales_order(params):
 
 
 @frappe.whitelist(methods="GET")
-def get_sales_order_list(name=None, customer=None, status=None, search=None, from_date=None, to_date=None, page_number=1, page_size=20, limit_start=None, limit_page_length=None):
+def get_sales_order_list(name=None, customer=None, status=None, search=None, from_date=None, to_date=None, route=None, page_number=1, page_size=20, limit_start=None, limit_page_length=None):
     """
     List Sales Orders with filters.
 
@@ -6754,7 +6806,8 @@ def get_sales_order_list(name=None, customer=None, status=None, search=None, fro
         status: Filter by status (Draft, To Deliver and Bill, Completed, Cancelled, etc.)
         search: Search by SO name or customer name
         from_date / to_date: Date range filter on transaction_date
-        limit_start / limit_page_length: Pagination
+        route: Filter by Customer Route
+        page_number / page_size: Pagination
     """
     try:
         # Support both pagination styles
@@ -6786,6 +6839,18 @@ def get_sales_order_list(name=None, customer=None, status=None, search=None, fro
             filters["transaction_date"] = [">=", from_date]
         elif to_date:
             filters["transaction_date"] = ["<=", to_date]
+
+        # Route filter - filter by customers that belong to a route
+        if route:
+            route_customers = frappe.get_all(
+                "Customer",
+                filters={"custom_route": route},
+                pluck="name"
+            )
+            if route_customers:
+                filters["customer"] = ["in", route_customers]
+            else:
+                return response("No customers found for this route", {"sales_orders": [], "total_count": 0, "page_number": int(page_number or 1), "page_size": _page_size}, True, 200)
 
         or_filters = None
         if search:
