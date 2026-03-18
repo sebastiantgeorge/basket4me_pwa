@@ -6744,7 +6744,7 @@ def delete_sales_order(params):
 
 
 @frappe.whitelist(methods="GET")
-def get_sales_order_list(name=None, customer=None, status=None, search=None, from_date=None, to_date=None, limit_start=0, limit_page_length=20):
+def get_sales_order_list(name=None, customer=None, status=None, search=None, from_date=None, to_date=None, page_number=1, page_size=20, limit_start=None, limit_page_length=None):
     """
     List Sales Orders with filters.
 
@@ -6757,6 +6757,13 @@ def get_sales_order_list(name=None, customer=None, status=None, search=None, fro
         limit_start / limit_page_length: Pagination
     """
     try:
+        # Support both pagination styles
+        _page_size = int(limit_page_length or page_size or 20)
+        if limit_start is not None:
+            _offset = int(limit_start)
+        else:
+            _offset = (int(page_number or 1) - 1) * _page_size
+
         sales_person = frappe.db.get_value("Sales Person", {"custom_user": frappe.session.user}, "name")
 
         filters = {}
@@ -6790,13 +6797,14 @@ def get_sales_order_list(name=None, customer=None, status=None, search=None, fro
         fields = [
             "name", "customer", "customer_name", "transaction_date", "delivery_date",
             "docstatus", "status", "total", "net_total", "grand_total", "currency",
-            "per_delivered", "per_billed", "customer_address", "remarks",
+            "per_delivered", "per_billed", "customer_address",
             "creation", "owner"
         ]
 
-        # Add custom_route if column exists
-        if frappe.db.has_column("Sales Order", "custom_route"):
-            fields.append("custom_route")
+        # Add optional columns if they exist
+        for optional_field in ["remarks", "custom_route"]:
+            if frappe.db.has_column("Sales Order", optional_field):
+                fields.append(optional_field)
 
         sales_orders = frappe.get_all(
             "Sales Order",
@@ -6804,8 +6812,8 @@ def get_sales_order_list(name=None, customer=None, status=None, search=None, fro
             or_filters=or_filters,
             fields=fields,
             order_by="creation desc",
-            limit_start=int(limit_start),
-            limit_page_length=int(limit_page_length)
+            limit_start=_offset,
+            limit_page_length=_page_size
         )
 
         total_count = frappe.db.count("Sales Order", filters=filters)
@@ -6843,8 +6851,8 @@ def get_sales_order_list(name=None, customer=None, status=None, search=None, fro
             {
                 "sales_orders": sales_orders,
                 "total_count": total_count,
-                "limit_start": int(limit_start),
-                "limit_page_length": int(limit_page_length)
+                "page_number": int(page_number or 1),
+                "page_size": _page_size,
             },
             True,
             200,
@@ -6903,7 +6911,7 @@ def get_sales_order_detail(name=None):
                 "per_delivered": so.per_delivered,
                 "per_billed": so.per_billed,
                 "po_no": so.po_no,
-                "remarks": so.remarks,
+                "remarks": getattr(so, "remarks", None),
                 "created_date": str(so.creation)[:10] if so.creation else None,
                 "created_by": frappe.db.get_value("User", so.owner, "full_name") or so.owner,
                 "items": [
