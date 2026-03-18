@@ -6397,11 +6397,21 @@ def create_sales_order(params):
 
             so.append("items", item_data)
 
+            # Get UOM conversion factor
+            conversion_factor = 1.0
+            if uom:
+                cf = frappe.db.get_value("UOM Conversion Detail",
+                    {"parent": item_code, "uom": uom}, "conversion_factor")
+                if cf:
+                    conversion_factor = flt(cf)
+
             response_items.append({
                 "item_code": item_code,
                 "description": description,
                 "qty": qty,
                 "uom": uom,
+                "stock_uom": frappe.db.get_value("Item", item_code, "stock_uom"),
+                "conversion_factor": conversion_factor,
                 "discount_amount": discount_amount,
                 "discount_percentage": discount_percentage,
                 "price_list_rate": price_list_rate,
@@ -6780,8 +6790,13 @@ def get_sales_order_list(name=None, customer=None, status=None, search=None, fro
         fields = [
             "name", "customer", "customer_name", "transaction_date", "delivery_date",
             "docstatus", "status", "total", "net_total", "grand_total", "currency",
-            "per_delivered", "per_billed"
+            "per_delivered", "per_billed", "customer_address", "remarks",
+            "creation", "owner"
         ]
+
+        # Add custom_route if column exists
+        if frappe.db.has_column("Sales Order", "custom_route"):
+            fields.append("custom_route")
 
         sales_orders = frappe.get_all(
             "Sales Order",
@@ -6796,10 +6811,31 @@ def get_sales_order_list(name=None, customer=None, status=None, search=None, fro
         total_count = frappe.db.count("Sales Order", filters=filters)
 
         for so in sales_orders:
+            # Get customer address details
+            if so.get("customer_address"):
+                addr = frappe.db.get_value("Address", so["customer_address"],
+                    ["address_line1", "address_line2", "city", "state", "pincode", "country"],
+                    as_dict=True)
+                so["address_display"] = addr if addr else None
+            else:
+                so["address_display"] = None
+
+            # Get customer route
+            if not so.get("custom_route"):
+                so["custom_route"] = frappe.db.get_value("Customer", so["customer"], "custom_route") or None
+
+            # Created info
+            so["created_date"] = str(so.get("creation", ""))[:10] if so.get("creation") else None
+            so["created_by"] = frappe.db.get_value("User", so.get("owner"), "full_name") or so.get("owner")
+
             so["items"] = frappe.get_all(
                 "Sales Order Item",
                 filters={"parent": so["name"]},
-                fields=["item_code", "item_name", "qty", "uom", "rate", "amount"]
+                fields=[
+                    "item_code", "item_name", "qty", "uom", "rate", "amount",
+                    "price_list_rate", "discount_percentage", "discount_amount",
+                    "conversion_factor", "stock_uom"
+                ]
             )
 
         return response(
@@ -6830,12 +6866,29 @@ def get_sales_order_detail(name=None):
 
         so = frappe.get_doc("Sales Order", name)
 
+        # Customer address
+        address_display = None
+        if so.customer_address:
+            address_display = frappe.db.get_value("Address", so.customer_address,
+                ["address_line1", "address_line2", "city", "state", "pincode", "country"],
+                as_dict=True)
+
+        # Customer route
+        customer_route = None
+        if hasattr(so, "custom_route") and so.custom_route:
+            customer_route = so.custom_route
+        else:
+            customer_route = frappe.db.get_value("Customer", so.customer, "custom_route") or None
+
         return response(
             "Sales Order fetched successfully",
             {
                 "name": so.name,
                 "customer": so.customer,
                 "customer_name": so.customer_name,
+                "customer_address": so.customer_address,
+                "address_display": address_display,
+                "customer_route": customer_route,
                 "transaction_date": str(so.transaction_date),
                 "delivery_date": str(so.delivery_date),
                 "docstatus": so.docstatus,
@@ -6850,6 +6903,9 @@ def get_sales_order_detail(name=None):
                 "per_delivered": so.per_delivered,
                 "per_billed": so.per_billed,
                 "po_no": so.po_no,
+                "remarks": so.remarks,
+                "created_date": str(so.creation)[:10] if so.creation else None,
+                "created_by": frappe.db.get_value("User", so.owner, "full_name") or so.owner,
                 "items": [
                     {
                         "name": item.name,
@@ -6858,6 +6914,8 @@ def get_sales_order_detail(name=None):
                         "description": item.description,
                         "qty": item.qty,
                         "uom": item.uom,
+                        "stock_uom": item.stock_uom,
+                        "conversion_factor": item.conversion_factor,
                         "rate": item.rate,
                         "price_list_rate": item.price_list_rate,
                         "discount_percentage": item.discount_percentage,
