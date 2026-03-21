@@ -2247,8 +2247,12 @@ def create_sales_invoice(params):
         if not sales_person_details:
             return response(f"No Basket4Me Settings found for sales person {sales_person}", {}, False, 400)
 
-        # Get effective price list
-        effective_price_list = get_effective_price_list(customer=customer, sales_person=sales_person)
+        # User-selected price list overrides auto-detection
+        user_price_list = params.get("price_list") or params.get("selling_price_list")
+        if user_price_list and frappe.db.exists("Price List", user_price_list):
+            effective_price_list = user_price_list
+        else:
+            effective_price_list = get_effective_price_list(customer=customer, sales_person=sales_person)
 
         customer_name = params.get("customer_name")
         tax_id = params.get("tax_id")
@@ -2271,7 +2275,7 @@ def create_sales_invoice(params):
         sales_invoice.posting_date = posting_date
         sales_invoice.custom_payment_type = payment_type
         sales_invoice.cost_center = sales_person_details.cost_center
-        sales_invoice.selling_price_list = effective_price_list  # Use effective price list
+        sales_invoice.selling_price_list = effective_price_list
         sales_invoice.custom_mobile_app = 1
         sales_invoice.set_posting_time = 1
         sales_invoice.company = sales_person_details.company
@@ -4842,6 +4846,127 @@ def get_price_list():
         return response(str(e), {}, False, 417)
 
 
+@frappe.whitelist(methods="GET")
+def get_price_list_details(name=None, page_number=1, page_size=20):
+    """
+    Get price lists with associated customers, item count, and company info.
+
+    Query params:
+        name: Filter/search by price list name
+        page_number: Page number (default: 1)
+        page_size: Records per page (default: 20)
+    """
+    try:
+        _page_size = int(page_size or 20)
+        _offset = (int(page_number or 1) - 1) * _page_size
+
+        filters = {"enabled": 1, "selling": 1}
+        or_filters = None
+        if name:
+            or_filters = [
+                ["name", "like", f"%{name}%"],
+                ["price_list_name", "like", f"%{name}%"],
+            ]
+
+        price_lists = frappe.get_all(
+            "Price List",
+            filters=filters,
+            or_filters=or_filters,
+            fields=["name", "price_list_name", "currency"],
+            order_by="name asc",
+            limit_start=_offset,
+            limit_page_length=_page_size
+        )
+
+        total_count = frappe.db.count("Price List", filters=filters)
+
+        for pl in price_lists:
+            # Customers using this price list
+            pl["customers"] = frappe.get_all(
+                "Customer",
+                filters={"default_price_list": pl["name"]},
+                fields=["name", "customer_name", "mobile_no", "territory"],
+                limit_page_length=0
+            )
+            pl["customer_count"] = len(pl["customers"])
+
+            # Item count in this price list
+            pl["item_count"] = frappe.db.count("Item Price", {
+                "price_list": pl["name"],
+                "selling": 1
+            })
+
+            # Companies using this as default (from Selling Settings or Sales Person Details)
+            pl["companies"] = frappe.db.sql("""
+                SELECT DISTINCT spd.company
+                FROM `tabSales Person Details` spd
+                WHERE spd.price_list = %s AND spd.company IS NOT NULL AND spd.company != ''
+            """, pl["name"], as_list=True)
+            pl["companies"] = [c[0] for c in pl["companies"]] if pl["companies"] else []
+
+        return response("Price List details fetched", {
+            "price_lists": price_lists,
+            "total_count": total_count,
+            "page_number": int(page_number or 1),
+            "page_size": _page_size,
+        }, True, 200)
+    except Exception as e:
+        frappe.log_error(title="Get Price List Details Error", message=str(e))
+        return response(str(e), {}, False, 500)
+
+
+@frappe.whitelist(methods="GET")
+def get_price_list_items(price_list=None, item_code=None, page_number=1, page_size=50):
+    """
+    Get items and their prices for a specific price list.
+
+    Query params:
+        price_list: Price List name (required)
+        item_code: Filter by item code or name
+        page_number / page_size: Pagination
+    """
+    try:
+        if not price_list:
+            return response("price_list is required", {}, False, 400)
+
+        _page_size = int(page_size or 50)
+        _offset = (int(page_number or 1) - 1) * _page_size
+
+        filters = {"price_list": price_list, "selling": 1}
+        or_filters = None
+        if item_code:
+            or_filters = [
+                ["item_code", "like", f"%{item_code}%"],
+                ["item_name", "like", f"%{item_code}%"],
+            ]
+
+        items = frappe.get_all(
+            "Item Price",
+            filters=filters,
+            or_filters=or_filters,
+            fields=[
+                "name", "item_code", "item_name", "uom", "price_list_rate",
+                "currency", "valid_from", "valid_upto", "batch_no"
+            ],
+            order_by="item_code asc",
+            limit_start=_offset,
+            limit_page_length=_page_size
+        )
+
+        total_count = frappe.db.count("Item Price", filters=filters)
+
+        return response("Price List items fetched", {
+            "items": items,
+            "price_list": price_list,
+            "total_count": total_count,
+            "page_number": int(page_number or 1),
+            "page_size": _page_size,
+        }, True, 200)
+    except Exception as e:
+        frappe.log_error(title="Get Price List Items Error", message=str(e))
+        return response(str(e), {}, False, 500)
+
+
 @frappe.whitelist(methods="POST")
 def toggle_sales_team_override(params):
     """
@@ -6332,6 +6457,7 @@ def create_sales_order(params):
         customer: Customer name (required)
         items: list of {"item_code", "qty", "uom", "rate", "discount_percentage", "discount_amount"} (required)
         delivery_date: Delivery date (optional, defaults to today)
+        price_list: User-selected price list (optional, overrides auto-detected price list)
         po_no: Purchase Order number (optional)
         remarks: Remarks (optional)
         custom_payment_type: Payment type (optional)
@@ -6353,7 +6479,12 @@ def create_sales_order(params):
         if not sales_person_details:
             return response(f"No Basket4Me Settings found for sales person {sales_person}", {}, False, 400)
 
-        effective_price_list = get_effective_price_list(customer=customer, sales_person=sales_person)
+        # User-selected price list overrides auto-detection
+        user_price_list = params.get("price_list") or params.get("selling_price_list")
+        if user_price_list and frappe.db.exists("Price List", user_price_list):
+            effective_price_list = user_price_list
+        else:
+            effective_price_list = get_effective_price_list(customer=customer, sales_person=sales_person)
 
         items = params.get("items")
         delivery_date = params.get("delivery_date") or nowdate()
