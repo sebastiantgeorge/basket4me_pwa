@@ -4916,13 +4916,15 @@ def get_price_list_details(name=None, page_number=1, page_size=20):
 
 
 @frappe.whitelist(methods="GET")
-def get_price_list_items(price_list=None, item_code=None, page_number=1, page_size=50):
+def get_price_list_items(price_list=None, item_code=None, item_name=None, name=None, search=None, page_number=1, page_size=50):
     """
     Get items and their prices for a specific price list.
 
     Query params:
         price_list: Price List name (required)
-        item_code: Filter by item code or name
+        name / item_code: Filter by item code
+        item_name: Filter by item name
+        search: Search across item_code and item_name
         page_number / page_size: Pagination
     """
     try:
@@ -4934,10 +4936,21 @@ def get_price_list_items(price_list=None, item_code=None, page_number=1, page_si
 
         filters = {"price_list": price_list, "selling": 1}
         or_filters = None
-        if item_code:
+
+        # Exact/partial filter by item_code
+        code_filter = name or item_code
+        if code_filter:
+            filters["item_code"] = ["like", f"%{code_filter}%"]
+
+        # Partial filter by item_name
+        if item_name:
+            filters["item_name"] = ["like", f"%{item_name}%"]
+
+        # Search across both item_code and item_name
+        if search:
             or_filters = [
-                ["item_code", "like", f"%{item_code}%"],
-                ["item_name", "like", f"%{item_code}%"],
+                ["item_code", "like", f"%{search}%"],
+                ["item_name", "like", f"%{search}%"],
             ]
 
         items = frappe.get_all(
