@@ -18,9 +18,10 @@
   "enable_batch_selection",
   "column_break_k6dn",
   "is_this_tax_included_in_basic_rate",
-  "enable_customer_based_price_list",
   "override_sales_team_in_customer",
   "payment_entry_based_on_sales_person",
+  "enable_global_price_list",
+  "enable_customer_based_price_list",
   "deduction_account",
   "cost_center",
   "section_break_npui",
@@ -151,12 +152,19 @@
    "fieldname": "enable_batch_selection",
    "fieldtype": "Check",
    "label": "Enable Batch Selection"
+  },
+  {
+   "default": "0",
+   "description": "When enabled, the system-wide Selling Price List (from Selling Settings) will be used for ALL transactions, overriding both customer-specific and sales person price lists. If both Global and Customer Based Price List are enabled, Global takes priority.",
+   "fieldname": "enable_global_price_list",
+   "fieldtype": "Check",
+   "label": "Enable Global Price List"
   }
  ],
  "index_web_pages_for_search": 1,
  "issingle": 1,
  "links": [],
- "modified": "2026-03-16 10:00:00.000000",
+ "modified": "2026-03-21 12:20:37.347793",
  "modified_by": "Administrator",
  "module": "Basket4Me PWA",
  "name": "Basket4Me Settings",

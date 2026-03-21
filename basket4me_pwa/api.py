@@ -178,7 +178,19 @@ def enforce_free_item_rates_delivery_note(delivery_note):
 
 def get_effective_price_list(customer=None, sales_person=None):
     """
-    Determines which price list to use based on Basket4Me Settings configuration
+    Determines which price list to use based on Basket4Me Settings configuration.
+
+    Priority (highest to lowest):
+        1. Enable Global Price List  → Uses Selling Settings price list for ALL transactions.
+           Overrides customer-based and sales person price lists.
+        2. Enable Customer Based Price List → Uses customer's default_price_list.
+        3. Sales Person Price List → From Sales Person Details table in Basket4Me Settings.
+        4. Selling Settings → System default selling price list.
+        5. Hard fallback → "Standard Selling"
+
+    If both "Enable Global Price List" and "Enable Customer Based Price List" are enabled,
+    Global Price List takes precedence — a single price list is enforced for all transactions.
+
     Args:
         customer: Customer ID or Name
         sales_person: Sales Person ID
@@ -189,88 +201,79 @@ def get_effective_price_list(customer=None, sales_person=None):
         # Get settings
         try:
             settings = get_basket4me_settings()
+            enable_global = settings.get("enable_global_price_list")
             enable_customer_based = settings.get("enable_customer_based_price_list")
         except:
+            enable_global = False
             enable_customer_based = False
             settings = None
-        
-        # Debug logging
-        frappe.log_error(f"Price List Debug - enable_customer_based: {enable_customer_based}, customer: {customer}, sales_person: {sales_person}", "Price List Debug")
-        
-        # Check if customer-based price list is enabled
+
+        # ── Priority 1: Global Price List (overrides everything) ──
+        if enable_global:
+            global_price_list = frappe.db.get_single_value("Selling Settings", "selling_price_list")
+            if global_price_list and global_price_list.strip():
+                return global_price_list
+            return "Standard Selling"
+
+        # ── Priority 2: Customer-Based Price List ──
         if enable_customer_based and customer:
             try:
-                # Customer lookup logic (working correctly)
                 customer_price_list = None
-                
+
                 # Try exact name match first
                 customer_data = frappe.db.get_value("Customer", customer, "default_price_list")
                 if customer_data:
                     customer_price_list = customer_data
-                    frappe.log_error(f"Price List Debug - Found by exact name: {customer_price_list}", "Price List Debug")
                 else:
                     # Try customer_name field match
                     customer_by_name = frappe.db.get_value("Customer", {"customer_name": customer}, "default_price_list")
                     if customer_by_name:
                         customer_price_list = customer_by_name
-                        frappe.log_error(f"Price List Debug - Found by customer_name field: {customer_price_list}", "Price List Debug")
                     else:
                         # Try fuzzy matching with SQL
                         customer_fuzzy = frappe.db.sql("""
-                            SELECT default_price_list 
-                            FROM `tabCustomer` 
-                            WHERE name = %s 
-                               OR customer_name = %s 
+                            SELECT default_price_list
+                            FROM `tabCustomer`
+                            WHERE name = %s
+                               OR customer_name = %s
                                OR TRIM(LOWER(customer_name)) = TRIM(LOWER(%s))
                                OR TRIM(LOWER(name)) = TRIM(LOWER(%s))
                             LIMIT 1
                         """, (customer, customer, customer, customer), as_dict=True)
-                        
+
                         if customer_fuzzy and customer_fuzzy[0].get("default_price_list"):
                             customer_price_list = customer_fuzzy[0].get("default_price_list")
-                            frappe.log_error(f"Price List Debug - Found by fuzzy match: {customer_price_list}", "Price List Debug")
-                
-                # IMPORTANT: Only use customer price list if it's not empty/null
+
+                # Only use customer price list if it's not empty/null
                 if customer_price_list and customer_price_list.strip():
-                    frappe.log_error(f"Price List Debug - Using customer price list: {customer_price_list}", "Price List Debug")
                     return customer_price_list
-                else:
-                    frappe.log_error(f"Price List Debug - Customer price list is empty, falling back", "Price List Debug")
-                    
+
             except Exception as e:
-                frappe.log_error(f"Price List Debug - Customer lookup error: {str(e)}", "Price List Debug")
-        
-        # Fallback to sales person price list
+                frappe.log_error(f"Price List - Customer lookup error: {str(e)}", "Price List Error")
+
+        # ── Priority 3: Sales Person Price List ──
         if sales_person and settings:
             try:
                 if hasattr(settings, 'sales_person_details'):
                     for detail in settings.sales_person_details:
                         if detail.sales_person == sales_person:
-                            # Check if price_list field exists and has a value
                             if hasattr(detail, 'price_list') and detail.price_list and detail.price_list.strip():
-                                frappe.log_error(f"Price List Debug - Using sales person price list: {detail.price_list}", "Price List Debug")
                                 return detail.price_list
-                            else:
-                                frappe.log_error(f"Price List Debug - Sales person price list is empty for {sales_person}", "Price List Debug")
                             break
             except Exception as e:
-                frappe.log_error(f"Price List Debug - Sales person lookup error: {str(e)}", "Price List Debug")
-        
-        # Final fallback to standard selling price list
+                frappe.log_error(f"Price List - Sales person lookup error: {str(e)}", "Price List Error")
+
+        # ── Priority 4: System Selling Settings ──
         try:
             standard_price_list = frappe.db.get_single_value("Selling Settings", "selling_price_list")
             if standard_price_list and standard_price_list.strip():
-                frappe.log_error(f"Price List Debug - Using system selling price list: {standard_price_list}", "Price List Debug")
                 return standard_price_list
-            else:
-                frappe.log_error(f"Price List Debug - System selling price list is empty, using hard fallback", "Price List Debug")
-                return "Standard Selling"
-        except Exception as e:
-            frappe.log_error(f"Price List Debug - System fallback error: {str(e)}, using hard fallback", "Price List Debug")
             return "Standard Selling"
-        
+        except:
+            return "Standard Selling"
+
     except Exception as e:
-        frappe.log_error(f"Price List Debug - General error: {str(e)}, using hard fallback", "Price List Debug")
+        frappe.log_error(f"Price List - General error: {str(e)}", "Price List Error")
         return "Standard Selling"
 
 
