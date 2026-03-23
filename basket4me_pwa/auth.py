@@ -185,11 +185,19 @@ def get_user_details(sid=None, user_id=None):
 
         company_default_price_list = None
         if company_name:
-            company_doc = frappe.db.get_value("Company", company_name,
-                ["company_logo", "default_price_list"], as_dict=True)
+            company_fields = ["company_logo"]
+            if frappe.db.has_column("Company", "default_price_list"):
+                company_fields.append("default_price_list")
+            company_doc = frappe.db.get_value("Company", company_name, company_fields, as_dict=True)
             if company_doc:
                 company_logo = company_doc.get("company_logo")
                 company_default_price_list = company_doc.get("default_price_list")
+            # Fallback: get from Selling Settings
+            if not company_default_price_list:
+                try:
+                    company_default_price_list = frappe.db.get_single_value("Selling Settings", "selling_price_list")
+                except Exception:
+                    pass
             if company_logo and not company_logo.startswith("http"):
                 company_logo = frappe.utils.get_url(company_logo)
 
