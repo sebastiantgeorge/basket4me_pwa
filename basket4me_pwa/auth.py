@@ -183,8 +183,13 @@ def get_user_details(sid=None, user_id=None):
         if not company_name:
             company_name = frappe.defaults.get_user_default("Company", user_id) or frappe.defaults.get_global_default("company")
 
+        company_default_price_list = None
         if company_name:
-            company_logo = frappe.db.get_value("Company", company_name, "company_logo")
+            company_doc = frappe.db.get_value("Company", company_name,
+                ["company_logo", "default_price_list"], as_dict=True)
+            if company_doc:
+                company_logo = company_doc.get("company_logo")
+                company_default_price_list = company_doc.get("default_price_list")
             if company_logo and not company_logo.startswith("http"):
                 company_logo = frappe.utils.get_url(company_logo)
 
@@ -230,6 +235,7 @@ def get_user_details(sid=None, user_id=None):
             "user_image": user_image,
             "company_name": company_name,
             "company_logo": company_logo,
+            "company_default_price_list": company_default_price_list,
             "employee_id": frappe.get_value("Employee", {'user_id': user_doc.name}),
             "permissions": permissions,
         }

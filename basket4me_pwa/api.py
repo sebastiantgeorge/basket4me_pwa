@@ -1666,7 +1666,7 @@ def get_item_list(name=None, item_name=None, customer=None, limit_start=0, limit
                     except Exception:
                         pass
 
-                # Get last customer rate (most recent rate sold to this customer)
+                # Get last customer rate (most recent rate sold to this customer based on default UOM)
                 last_customer_rate = 0.0
                 if customer:
                     try:
@@ -1675,16 +1675,50 @@ def get_item_list(name=None, item_name=None, customer=None, limit_start=0, limit
                             FROM `tabSales Invoice Item` sii
                             JOIN `tabSales Invoice` si ON si.name = sii.parent
                             WHERE si.customer = %s AND sii.item_code = %s
+                              AND sii.uom = %s
                               AND si.docstatus = 1
                             ORDER BY si.posting_date DESC, si.creation DESC
                             LIMIT 1
-                        """, (customer, item["name"]), as_dict=True)
+                        """, (customer, item["name"], item.get("stock_uom", "Nos")), as_dict=True)
                         if last_rate:
                             last_customer_rate = last_rate[0].get("rate") or 0.0
                     except Exception:
                         pass
 
+                # MRP - from "MRP" price list based on default UOM
+                mrp = 0.0
+                try:
+                    mrp_result = frappe.db.sql("""
+                        SELECT price_list_rate
+                        FROM `tabItem Price`
+                        WHERE selling = 1 AND item_code = %s
+                        AND price_list = 'MRP'
+                        AND (uom = %s OR uom IS NULL OR uom = '')
+                        ORDER BY creation DESC LIMIT 1
+                    """, (item["name"], item.get("stock_uom", "Nos")), as_dict=True)
+                    if mrp_result:
+                        mrp = mrp_result[0].get("price_list_rate") or 0.0
+                except Exception:
+                    pass
+
+                # Standard Selling Price - from "Standard Selling" price list based on default UOM
+                standard_selling_price = 0.0
+                try:
+                    std_result = frappe.db.sql("""
+                        SELECT price_list_rate
+                        FROM `tabItem Price`
+                        WHERE selling = 1 AND item_code = %s
+                        AND price_list = 'Standard Selling'
+                        AND (uom = %s OR uom IS NULL OR uom = '')
+                        ORDER BY creation DESC LIMIT 1
+                    """, (item["name"], item.get("stock_uom", "Nos")), as_dict=True)
+                    if std_result:
+                        standard_selling_price = std_result[0].get("price_list_rate") or 0.0
+                except Exception:
+                    pass
+
                 # Set item properties safely
+                item["default_uom"] = item.get("stock_uom", "Nos")
                 item["uoms"] = uoms_with_prices
                 item["tax_rate"] = tax_rate
                 item["is_tax_included"] = include_tax
@@ -1693,10 +1727,13 @@ def get_item_list(name=None, item_name=None, customer=None, limit_start=0, limit
                 item["valuation_rate"] = valuation_rate
                 item["last_purchase_rate"] = last_purchase_rate
                 item["last_customer_rate"] = last_customer_rate
+                item["mrp"] = mrp
+                item["standard_selling_price"] = standard_selling_price
 
             except Exception as e:
                 frappe.log_error(f"Error processing item {item.get('name', 'unknown')}: {str(e)}", "Item List Error")
                 # Set safe defaults
+                item["default_uom"] = item.get("stock_uom", "Nos")
                 item["uoms"] = []
                 item["tax_rate"] = 0.0
                 item["is_tax_included"] = include_tax
@@ -1705,6 +1742,8 @@ def get_item_list(name=None, item_name=None, customer=None, limit_start=0, limit
                 item["valuation_rate"] = 0.0
                 item["last_purchase_rate"] = 0.0
                 item["last_customer_rate"] = 0.0
+                item["mrp"] = 0.0
+                item["standard_selling_price"] = 0.0
 
         if item_list:
             return response("Item List", item_list, True, 200)
