@@ -4955,15 +4955,16 @@ def get_price_list_details(name=None, page_number=1, page_size=20):
 
 
 @frappe.whitelist(methods="GET")
-def get_price_list_items(price_list=None, item_code=None, item_name=None, name=None, search=None, page_number=1, page_size=50):
+def get_price_list_items(price_list=None, item_code=None, item_name=None, name=None, search=None, customer=None, page_number=1, page_size=50):
     """
-    Get items and their prices for a specific price list.
+    Get items and their prices for a specific price list with enhanced details.
 
     Query params:
         price_list: Price List name (required)
         name / item_code: Filter by item code
         item_name: Filter by item name
         search: Search across item_code and item_name
+        customer: Customer name (for last customer rate)
         page_number / page_size: Pagination
     """
     try:
@@ -5006,6 +5007,76 @@ def get_price_list_items(price_list=None, item_code=None, item_name=None, name=N
         )
 
         total_count = frappe.db.count("Item Price", filters=filters)
+
+        # Enrich each item with enhanced details
+        for item in items:
+            ic = item["item_code"]
+
+            # Default UOM (stock_uom)
+            stock_uom = frappe.db.get_value("Item", ic, "stock_uom") or "Nos"
+            item["default_uom"] = stock_uom
+
+            # All UOMs with conversion factor and rate for selected price list
+            uom_details = frappe.db.sql("""
+                SELECT uom, conversion_factor
+                FROM `tabUOM Conversion Detail`
+                WHERE parent = %s AND parenttype = 'Item'
+                ORDER BY idx ASC
+            """, ic, as_dict=True)
+
+            if not uom_details:
+                uom_details = [{"uom": stock_uom, "conversion_factor": 1.0}]
+
+            uoms = []
+            for ud in uom_details:
+                uom_name = ud.get("uom")
+                cf = ud.get("conversion_factor", 1.0)
+                # Rate for this UOM in the selected price list
+                rate = frappe.db.sql("""
+                    SELECT price_list_rate FROM `tabItem Price`
+                    WHERE selling = 1 AND item_code = %s AND price_list = %s
+                    AND (uom = %s OR uom IS NULL OR uom = '')
+                    ORDER BY CASE WHEN uom = %s THEN 0 ELSE 1 END, creation DESC
+                    LIMIT 1
+                """, (ic, price_list, uom_name, uom_name), as_dict=True)
+                uom_rate = rate[0]["price_list_rate"] if rate else 0.0
+                uoms.append({
+                    "uom": uom_name,
+                    "conversion_factor": cf,
+                    "rate": uom_rate
+                })
+            item["uoms"] = uoms
+
+            # MRP - from "MRP" price list based on default UOM
+            mrp_result = frappe.db.sql("""
+                SELECT price_list_rate FROM `tabItem Price`
+                WHERE selling = 1 AND item_code = %s AND price_list = 'MRP'
+                AND (uom = %s OR uom IS NULL OR uom = '')
+                ORDER BY creation DESC LIMIT 1
+            """, (ic, stock_uom), as_dict=True)
+            item["mrp"] = mrp_result[0]["price_list_rate"] if mrp_result else 0.0
+
+            # Standard Selling Price based on default UOM
+            std_result = frappe.db.sql("""
+                SELECT price_list_rate FROM `tabItem Price`
+                WHERE selling = 1 AND item_code = %s AND price_list = 'Standard Selling'
+                AND (uom = %s OR uom IS NULL OR uom = '')
+                ORDER BY creation DESC LIMIT 1
+            """, (ic, stock_uom), as_dict=True)
+            item["standard_selling_price"] = std_result[0]["price_list_rate"] if std_result else 0.0
+
+            # Last Customer Rate (if customer param provided)
+            item["last_customer_rate"] = 0.0
+            if customer:
+                last_rate = frappe.db.sql("""
+                    SELECT sii.rate FROM `tabSales Invoice Item` sii
+                    JOIN `tabSales Invoice` si ON si.name = sii.parent
+                    WHERE si.customer = %s AND sii.item_code = %s
+                    AND sii.uom = %s AND si.docstatus = 1
+                    ORDER BY si.posting_date DESC, si.creation DESC LIMIT 1
+                """, (customer, ic, stock_uom), as_dict=True)
+                if last_rate:
+                    item["last_customer_rate"] = last_rate[0].get("rate") or 0.0
 
         return response("Price List items fetched", {
             "items": items,
