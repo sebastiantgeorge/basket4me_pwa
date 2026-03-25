@@ -5078,6 +5078,31 @@ def get_price_list_items(price_list=None, item_code=None, item_name=None, name=N
                 if last_rate:
                     item["last_customer_rate"] = last_rate[0].get("rate") or 0.0
 
+            # Available stock qty from salesperson warehouse or total
+            item["available_qty"] = 0.0
+            try:
+                sales_person = frappe.db.get_value("Sales Person", {"custom_user": frappe.session.user}, "name")
+                settings = get_basket4me_settings()
+                warehouse = None
+                if sales_person and settings:
+                    for detail in settings.sales_person_details:
+                        if detail.sales_person == sales_person:
+                            warehouse = detail.warehouse
+                            break
+
+                if warehouse:
+                    item["available_qty"] = flt(frappe.db.get_value("Bin",
+                        {"item_code": ic, "warehouse": warehouse}, "actual_qty") or 0)
+                else:
+                    # Total stock across all warehouses
+                    total_qty = frappe.db.sql("""
+                        SELECT COALESCE(SUM(actual_qty), 0) as qty
+                        FROM `tabBin` WHERE item_code = %s
+                    """, ic)
+                    item["available_qty"] = flt(total_qty[0][0]) if total_qty else 0.0
+            except Exception:
+                item["available_qty"] = 0.0
+
         return response("Price List items fetched", {
             "items": items,
             "price_list": price_list,
