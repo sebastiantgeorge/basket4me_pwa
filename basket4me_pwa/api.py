@@ -8732,3 +8732,134 @@ def get_territories():
     except Exception as e:
         return response(str(e), {}, False, 500)
 
+
+@frappe.whitelist(methods="GET")
+def get_transaction_history(item_code=None, customer=None, doctype=None,
+                            from_date=None, to_date=None, page_number=1, page_size=20):
+    """
+    Get transaction history (SO/SI/Sales Return) by item, customer, or doctype.
+
+    Query params:
+        item_code: Filter by item code
+        customer: Filter by customer
+        doctype: Filter by type - "Sales Order", "Sales Invoice", "Sales Return" or None (all)
+        from_date / to_date: Date range filter
+        page_number / page_size: Pagination
+    """
+    try:
+        _page_size = int(page_size or 20)
+        _offset = (int(page_number or 1) - 1) * _page_size
+
+        if not item_code and not customer:
+            return response("item_code or customer is required", {}, False, 400)
+
+        # Determine which doctypes to query
+        doc_types = []
+        if doctype == "Sales Order":
+            doc_types = [("Sales Order", "Sales Order Item", "transaction_date")]
+        elif doctype == "Sales Invoice":
+            doc_types = [("Sales Invoice", "Sales Invoice Item", "posting_date")]
+        elif doctype == "Sales Return":
+            doc_types = [("Sales Invoice", "Sales Invoice Item", "posting_date")]
+        else:
+            doc_types = [
+                ("Sales Order", "Sales Order Item", "transaction_date"),
+                ("Sales Invoice", "Sales Invoice Item", "posting_date"),
+            ]
+
+        all_transactions = []
+
+        for parent_dt, child_dt, date_field in doc_types:
+            conditions = ["p.docstatus != 0"]
+            values = []
+
+            # For Sales Return, filter is_return=1; for Sales Invoice, is_return=0
+            if parent_dt == "Sales Invoice":
+                if doctype == "Sales Return":
+                    conditions.append("p.is_return = 1")
+                elif doctype == "Sales Invoice":
+                    conditions.append("p.is_return = 0")
+                # If doctype is None (all), include both regular SI and returns
+
+            if customer:
+                conditions.append("p.customer = %s")
+                values.append(customer)
+
+            if item_code:
+                conditions.append("c.item_code = %s")
+                values.append(item_code)
+
+            if from_date:
+                conditions.append(f"p.{date_field} >= %s")
+                values.append(from_date)
+
+            if to_date:
+                conditions.append(f"p.{date_field} <= %s")
+                values.append(to_date)
+
+            where_clause = " AND ".join(conditions)
+
+            # Check if selling_price_list column exists
+            price_list_field = "p.selling_price_list" if frappe.db.has_column(parent_dt, "selling_price_list") else "'' as selling_price_list"
+
+            query = f"""
+                SELECT
+                    p.name as ref_no,
+                    '{parent_dt}' as doc_type,
+                    CASE WHEN '{parent_dt}' = 'Sales Invoice' AND p.is_return = 1
+                        THEN 'Sales Return' ELSE '{parent_dt}' END as transaction_type,
+                    p.{date_field} as date,
+                    p.customer,
+                    p.customer_name,
+                    p.docstatus,
+                    p.status,
+                    {price_list_field},
+                    c.item_code,
+                    c.item_name,
+                    c.qty,
+                    c.uom,
+                    c.stock_uom,
+                    c.conversion_factor,
+                    c.rate,
+                    c.amount,
+                    c.price_list_rate,
+                    c.discount_percentage,
+                    c.discount_amount
+                FROM `tab{parent_dt}` p
+                INNER JOIN `tab{child_dt}` c ON c.parent = p.name
+                WHERE {where_clause}
+                ORDER BY p.{date_field} DESC, p.name DESC
+            """
+
+            rows = frappe.db.sql(query, values, as_dict=True)
+            all_transactions.extend(rows)
+
+        # Sort all combined results by date desc
+        all_transactions.sort(key=lambda x: str(x.get("date", "")), reverse=True)
+
+        total_count = len(all_transactions)
+
+        # Apply pagination
+        paginated = all_transactions[_offset:_offset + _page_size]
+
+        # Summary
+        summary = {
+            "total_qty": sum(flt(t.get("qty", 0)) for t in all_transactions),
+            "total_amount": sum(flt(t.get("amount", 0)) for t in all_transactions),
+            "total_discount": sum(flt(t.get("discount_amount", 0)) for t in all_transactions),
+            "so_count": len([t for t in all_transactions if t.get("transaction_type") == "Sales Order"]),
+            "si_count": len([t for t in all_transactions if t.get("transaction_type") == "Sales Invoice"]),
+            "return_count": len([t for t in all_transactions if t.get("transaction_type") == "Sales Return"]),
+        }
+
+        return response("Transaction history fetched", {
+            "transactions": paginated,
+            "summary": summary,
+            "total_count": total_count,
+            "page_number": int(page_number or 1),
+            "page_size": _page_size,
+        }, True, 200)
+    except Exception as e:
+        frappe.log_error(title="Get Transaction History Error", message=str(e))
+        return response(str(e), {}, False, 500)
+
