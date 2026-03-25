@@ -1507,7 +1507,7 @@ def get_item_by_barcode(barcode=None):
 @frappe.whitelist(methods="GET")
 def get_item_list(name=None, item_name=None, customer=None, limit_start=0, limit_page_length=20):
     try:
-        filters = {"custom_allow_mobile_app": 1}
+        filters = {"custom_allow_mobile_app": 1, "disabled": 0}
         fields = ['name', 'item_name', "description", "stock_uom", "has_batch_no"]
 
         if name:
@@ -4993,6 +4993,9 @@ def get_price_list_items(price_list=None, item_code=None, item_name=None, name=N
                 ["item_name", "like", f"%{search}%"],
             ]
 
+        # Get disabled items to exclude
+        disabled_items = set(frappe.get_all("Item", filters={"disabled": 1}, pluck="name"))
+
         items = frappe.get_all(
             "Item Price",
             filters=filters,
@@ -5005,6 +5008,9 @@ def get_price_list_items(price_list=None, item_code=None, item_name=None, name=N
             limit_start=_offset,
             limit_page_length=_page_size
         )
+
+        # Filter out disabled items
+        items = [item for item in items if item["item_code"] not in disabled_items]
 
         total_count = frappe.db.count("Item Price", filters=filters)
 
