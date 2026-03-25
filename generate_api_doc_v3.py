@@ -193,6 +193,7 @@ toc_items = [
     "13. Print (5 endpoints)",
     "14. Config & Settings (10 endpoints)",
     "15. Shift Management (3 endpoints)",
+    "16. Transaction History (1 endpoint)",
     "",
     "Appendix A: Auth Header Format",
     "Appendix B: Standard Error Response Format",
@@ -865,25 +866,48 @@ add_endpoint_detail(
 
 add_endpoint_detail(
     API_PREFIX + "get_price_list_items", "GET",
-    "Get items in a specific price list with search and pagination.",
+    "Get items in a specific price list with enhanced details: default UOM, all UOMs with conversion factor & rate, MRP, standard selling price, last customer rate, and available stock qty.",
     params=[
         {"name": "price_list", "type": "String", "required": "Yes", "desc": "Price list name"},
         {"name": "item_code", "type": "String", "required": "No", "desc": "Filter by item code"},
         {"name": "item_name", "type": "String", "required": "No", "desc": "Filter by item name"},
-        {"name": "name", "type": "String", "required": "No", "desc": "Filter by price list item name"},
-        {"name": "search", "type": "String", "required": "No", "desc": "General search across name, item_code, item_name"},
+        {"name": "name", "type": "String", "required": "No", "desc": "Alias for item_code filter"},
+        {"name": "search", "type": "String", "required": "No", "desc": "Search across item_code and item_name"},
+        {"name": "customer", "type": "String", "required": "No", "desc": "Customer name (for last customer rate)"},
         {"name": "page_number", "type": "Int", "required": "No", "desc": "Page number (default: 1)"},
         {"name": "page_size", "type": "Int", "required": "No", "desc": "Results per page (default: 50)"},
     ],
     response_body={
-        "message": {
-            "data": [
-                {"name": "IPRICE-001", "item_code": "ITEM-0001", "item_name": "Mineral Water 500ml", "price_list_rate": 1.25, "currency": "SAR", "uom": "Nos"}
+        "message": "Price List items fetched",
+        "data": {
+            "items": [
+                {
+                    "name": "3ng497r8pn",
+                    "item_code": "AF00890",
+                    "item_name": "B Unibic Cashew Rs.10*192",
+                    "uom": "Nos",
+                    "price_list_rate": 108.0,
+                    "currency": "INR",
+                    "valid_from": "2025-06-19",
+                    "valid_upto": None,
+                    "batch_no": None,
+                    "default_uom": "Nos",
+                    "uoms": [
+                        {"uom": "Nos", "conversion_factor": 1.0, "rate": 106.8},
+                        {"uom": "Box", "conversion_factor": 192.0, "rate": 20505.6}
+                    ],
+                    "mrp": 10.0,
+                    "standard_selling_price": 106.8,
+                    "last_customer_rate": 106.8,
+                    "available_qty": 54.0
+                }
             ],
-            "total_count": 150,
+            "price_list": "Standard Selling",
+            "total_count": 2283,
             "page_number": 1,
             "page_size": 50
-        }
+        },
+        "success": True
     },
 )
 
@@ -1931,6 +1955,134 @@ add_endpoint_detail(
         }
     },
 )
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SECTION 16: Transaction History
+# ══════════════════════════════════════════════════════════════════════════════
+
+section_heading(16, "Transaction History")
+
+th_endpoints = [
+    {"path": API_PREFIX + "get_transaction_history", "method": "GET", "desc": "Get combined transaction history (SO/SI/Return) by item, customer, or doctype"},
+]
+add_endpoint_summary_table(th_endpoints)
+
+add_endpoint_detail(
+    API_PREFIX + "get_transaction_history", "GET",
+    "Get transaction history across Sales Orders, Sales Invoices, and Sales Returns. Filter by item, customer, doctype, and date range. Returns per-line details with summary totals.",
+    params=[
+        {"name": "item_code", "type": "String", "required": "Conditional", "desc": "Filter by item code (item_code or customer required)"},
+        {"name": "customer", "type": "String", "required": "Conditional", "desc": "Filter by customer (item_code or customer required)"},
+        {"name": "doctype", "type": "String", "required": "No", "desc": "'Sales Order', 'Sales Invoice', 'Sales Return', or empty for all"},
+        {"name": "from_date", "type": "String", "required": "No", "desc": "Start date (YYYY-MM-DD)"},
+        {"name": "to_date", "type": "String", "required": "No", "desc": "End date (YYYY-MM-DD)"},
+        {"name": "page_number", "type": "Int", "required": "No", "desc": "Page number (default: 1)"},
+        {"name": "page_size", "type": "Int", "required": "No", "desc": "Results per page (default: 20)"},
+    ],
+    response_body={
+        "message": "Transaction history fetched",
+        "data": {
+            "transactions": [
+                {
+                    "ref_no": "DA-A2526-14448",
+                    "doc_type": "Sales Invoice",
+                    "transaction_type": "Sales Invoice",
+                    "date": "2026-03-21",
+                    "customer": "Vimal Store Cherthala",
+                    "customer_name": "Vimal Store Cherthala",
+                    "docstatus": 1,
+                    "status": "Paid",
+                    "selling_price_list": "Standard Selling",
+                    "item_code": "AF00890",
+                    "item_name": "B Unibic Cashew Rs.10*192",
+                    "qty": 2.0,
+                    "uom": "Nos",
+                    "stock_uom": "Nos",
+                    "conversion_factor": 1.0,
+                    "rate": 106.8,
+                    "amount": 213.6,
+                    "price_list_rate": 106.8,
+                    "discount_percentage": 0,
+                    "discount_amount": 0
+                },
+                {
+                    "ref_no": "DA-SO-2026-01459",
+                    "doc_type": "Sales Order",
+                    "transaction_type": "Sales Order",
+                    "date": "2026-03-17",
+                    "customer": "Vimal Store Cherthala",
+                    "customer_name": "Vimal Store Cherthala",
+                    "docstatus": 1,
+                    "status": "Completed",
+                    "selling_price_list": "Standard Selling",
+                    "item_code": "AF00890",
+                    "item_name": "B Unibic Cashew Rs.10*192",
+                    "qty": 2.0,
+                    "uom": "Nos",
+                    "stock_uom": "Nos",
+                    "conversion_factor": 1.0,
+                    "rate": 106.8,
+                    "amount": 213.6,
+                    "price_list_rate": 106.8,
+                    "discount_percentage": 0,
+                    "discount_amount": 0
+                },
+                {
+                    "ref_no": "DA-A2526-14500",
+                    "doc_type": "Sales Invoice",
+                    "transaction_type": "Sales Return",
+                    "date": "2026-03-22",
+                    "customer": "Vimal Store Cherthala",
+                    "customer_name": "Vimal Store Cherthala",
+                    "docstatus": 1,
+                    "status": "Return",
+                    "selling_price_list": "Standard Selling",
+                    "item_code": "AF00890",
+                    "item_name": "B Unibic Cashew Rs.10*192",
+                    "qty": -1.0,
+                    "uom": "Nos",
+                    "stock_uom": "Nos",
+                    "conversion_factor": 1.0,
+                    "rate": 106.8,
+                    "amount": -106.8,
+                    "price_list_rate": 106.8,
+                    "discount_percentage": 0,
+                    "discount_amount": 0
+                }
+            ],
+            "summary": {
+                "total_qty": 3.0,
+                "total_amount": 320.4,
+                "total_discount": 0,
+                "so_count": 1,
+                "si_count": 1,
+                "return_count": 1
+            },
+            "total_count": 3,
+            "page_number": 1,
+            "page_size": 20
+        },
+        "success": True
+    },
+)
+
+doc.add_paragraph()
+p = doc.add_paragraph()
+run = p.add_run("Filter Examples:")
+run.bold = True
+run.font.size = Pt(10)
+
+examples = [
+    ("By Item", "?item_code=AF00890"),
+    ("By Customer", "?customer=Vimal Store Cherthala"),
+    ("By Customer + DocType", "?customer=Vimal Store Cherthala&doctype=Sales Invoice"),
+    ("By Item + Customer", "?item_code=AF00890&customer=Vimal Store Cherthala"),
+    ("By Item + Date Range", "?item_code=AF00890&from_date=2026-01-01&to_date=2026-03-25"),
+    ("Sales Returns Only", "?customer=Vimal Store Cherthala&doctype=Sales Return"),
+]
+rows = [[ex[0], ex[1]] for ex in examples]
+make_table(["Filter", "Query String"], rows, header_color="2D8B4E")
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # APPENDIX A: Auth Header Format
