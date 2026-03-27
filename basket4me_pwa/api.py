@@ -6692,14 +6692,17 @@ def create_sales_order(params):
 
             latest_item_price = item_price[0]["price_list_rate"] if item_price else None
 
+            # price_list_rate is the reference rate from Item Price
+            price_list_rate = flt(latest_item_price) if latest_item_price is not None else flt(provided_rate)
+
+            # Actual rate: use frontend-provided rate; fallback to price list rate
             if is_free_item:
                 rate = 0
-            elif latest_item_price is not None:
-                rate = latest_item_price
+            elif provided_rate is not None and str(provided_rate).strip() != "":
+                rate = flt(provided_rate)
             else:
-                rate = provided_rate
+                rate = price_list_rate
 
-            price_list_rate = flt(rate)
             provided_discount_percentage = flt(item.get("discount_percentage", 0))
             provided_discount_amount = flt(item.get("discount_amount", 0))
 
@@ -6713,7 +6716,7 @@ def create_sales_order(params):
                 discount_percentage = 0
                 discount_amount = 0
 
-            discounted_rate = price_list_rate - discount_amount
+            discounted_rate = rate - discount_amount
 
             item_data = {
                 "item_code": item_code,
@@ -6898,14 +6901,17 @@ def update_sales_order(params):
 
                 latest_item_price = item_price[0]["price_list_rate"] if item_price else None
 
+                # price_list_rate is the reference rate from Item Price
+                price_list_rate = flt(latest_item_price) if latest_item_price is not None else flt(provided_rate)
+
+                # Actual rate: use frontend-provided rate; fallback to price list rate
                 if is_free_item:
                     rate = 0
-                elif latest_item_price is not None:
-                    rate = latest_item_price
+                elif provided_rate is not None and str(provided_rate).strip() != "":
+                    rate = flt(provided_rate)
                 else:
-                    rate = provided_rate
+                    rate = price_list_rate
 
-                price_list_rate = flt(rate)
                 provided_discount_percentage = flt(item.get("discount_percentage", 0))
                 provided_discount_amount = flt(item.get("discount_amount", 0))
 
@@ -6919,7 +6925,7 @@ def update_sales_order(params):
                     discount_percentage = 0
                     discount_amount = 0
 
-                discounted_rate = price_list_rate - discount_amount
+                discounted_rate = rate - discount_amount
 
                 item_data = {
                     "item_code": item_code,
