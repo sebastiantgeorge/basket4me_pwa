@@ -7276,8 +7276,8 @@ def get_sales_order_detail(name=None):
                 "warehouse": item.warehouse,
                 "delivery_date": str(item.delivery_date) if item.delivery_date else None,
                 "currency": so.currency,
-                "is_free_item": item.is_free_item,
-                "batch_no": item.batch_no,
+                "is_free_item": getattr(item, "is_free_item", 0),
+                "batch_no": getattr(item, "batch_no", None),
                 "uoms": [{"uom": u.get("uom"), "conversion_factor": u.get("conversion_factor", 1.0)} for u in uom_details],
             })
 
