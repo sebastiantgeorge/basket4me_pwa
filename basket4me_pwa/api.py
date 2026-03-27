@@ -7247,6 +7247,40 @@ def get_sales_order_detail(name=None):
         else:
             customer_route = frappe.db.get_value("Customer", so.customer, "custom_route") or None
 
+        # Build items with UOM details
+        items_data = []
+        for item in so.items:
+            uom_details = frappe.db.sql("""
+                SELECT uom, conversion_factor
+                FROM `tabUOM Conversion Detail`
+                WHERE parent = %s AND parenttype = 'Item'
+                ORDER BY idx ASC
+            """, item.item_code, as_dict=True)
+            if not uom_details:
+                uom_details = [{"uom": item.stock_uom, "conversion_factor": 1.0}]
+
+            items_data.append({
+                "name": item.name,
+                "item_code": item.item_code,
+                "item_name": item.item_name,
+                "description": item.description,
+                "qty": item.qty,
+                "uom": item.uom,
+                "stock_uom": item.stock_uom,
+                "conversion_factor": item.conversion_factor,
+                "rate": item.rate,
+                "price_list_rate": item.price_list_rate,
+                "discount_percentage": item.discount_percentage,
+                "discount_amount": item.discount_amount,
+                "amount": item.amount,
+                "warehouse": item.warehouse,
+                "delivery_date": str(item.delivery_date) if item.delivery_date else None,
+                "currency": so.currency,
+                "is_free_item": item.is_free_item,
+                "batch_no": item.batch_no,
+                "uoms": [{"uom": u.get("uom"), "conversion_factor": u.get("conversion_factor", 1.0)} for u in uom_details],
+            })
+
         return response(
             "Sales Order fetched successfully",
             {
@@ -7273,25 +7307,7 @@ def get_sales_order_detail(name=None):
                 "remarks": getattr(so, "remarks", None),
                 "created_date": str(so.creation)[:10] if so.creation else None,
                 "created_by": frappe.db.get_value("User", so.owner, "full_name") or so.owner,
-                "items": [
-                    {
-                        "name": item.name,
-                        "item_code": item.item_code,
-                        "item_name": item.item_name,
-                        "description": item.description,
-                        "qty": item.qty,
-                        "uom": item.uom,
-                        "stock_uom": item.stock_uom,
-                        "conversion_factor": item.conversion_factor,
-                        "rate": item.rate,
-                        "price_list_rate": item.price_list_rate,
-                        "discount_percentage": item.discount_percentage,
-                        "discount_amount": item.discount_amount,
-                        "amount": item.amount,
-                        "warehouse": item.warehouse,
-                        "delivery_date": str(item.delivery_date) if item.delivery_date else None,
-                    } for item in so.items
-                ],
+                "items": items_data,
                 "taxes": [
                     {
                         "charge_type": tax.charge_type,
