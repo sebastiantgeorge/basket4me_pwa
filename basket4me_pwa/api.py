@@ -7278,26 +7278,60 @@ def get_sales_order_detail(name=None):
         else:
             customer_route = frappe.db.get_value("Customer", so.customer, "custom_route") or None
 
-        # Build items with UOM details
+        # Build items with UOM details and pricing
         items_data = []
         for item in so.items:
+            ic = item.item_code
+            stock_uom = item.stock_uom or "Nos"
+
             uom_details = frappe.db.sql("""
                 SELECT uom, conversion_factor
                 FROM `tabUOM Conversion Detail`
                 WHERE parent = %s AND parenttype = 'Item'
                 ORDER BY idx ASC
-            """, item.item_code, as_dict=True)
+            """, ic, as_dict=True)
             if not uom_details:
-                uom_details = [{"uom": item.stock_uom, "conversion_factor": 1.0}]
+                uom_details = [{"uom": stock_uom, "conversion_factor": 1.0}]
+
+            # MRP from "MRP" price list based on default UOM
+            mrp_result = frappe.db.sql("""
+                SELECT price_list_rate FROM `tabItem Price`
+                WHERE selling = 1 AND item_code = %s AND price_list = 'MRP'
+                AND (uom = %s OR uom IS NULL OR uom = '')
+                ORDER BY valid_from DESC, creation DESC LIMIT 1
+            """, (ic, stock_uom), as_dict=True)
+            mrp = mrp_result[0]["price_list_rate"] if mrp_result else 0.0
+
+            # Standard Selling Price based on default UOM
+            std_result = frappe.db.sql("""
+                SELECT price_list_rate FROM `tabItem Price`
+                WHERE selling = 1 AND item_code = %s AND price_list = 'Standard Selling'
+                AND (uom = %s OR uom IS NULL OR uom = '')
+                ORDER BY valid_from DESC, creation DESC LIMIT 1
+            """, (ic, stock_uom), as_dict=True)
+            standard_selling_price = std_result[0]["price_list_rate"] if std_result else 0.0
+
+            # Last Customer Rate from submitted Sales Invoices
+            last_customer_rate = 0.0
+            if so.customer:
+                last_rate = frappe.db.sql("""
+                    SELECT sii.rate FROM `tabSales Invoice Item` sii
+                    JOIN `tabSales Invoice` si ON si.name = sii.parent
+                    WHERE si.customer = %s AND sii.item_code = %s
+                    AND sii.uom = %s AND si.docstatus = 1 AND si.is_return = 0
+                    ORDER BY si.posting_date DESC, si.creation DESC LIMIT 1
+                """, (so.customer, ic, stock_uom), as_dict=True)
+                if last_rate:
+                    last_customer_rate = last_rate[0].get("rate") or 0.0
 
             items_data.append({
                 "name": item.name,
-                "item_code": item.item_code,
+                "item_code": ic,
                 "item_name": item.item_name,
                 "description": item.description,
                 "qty": item.qty,
                 "uom": item.uom,
-                "stock_uom": item.stock_uom,
+                "stock_uom": stock_uom,
                 "conversion_factor": item.conversion_factor,
                 "rate": item.rate,
                 "price_list_rate": item.price_list_rate,
@@ -7310,6 +7344,9 @@ def get_sales_order_detail(name=None):
                 "is_free_item": getattr(item, "is_free_item", 0),
                 "batch_no": getattr(item, "batch_no", None),
                 "uoms": [{"uom": u.get("uom"), "conversion_factor": u.get("conversion_factor", 1.0)} for u in uom_details],
+                "mrp": mrp,
+                "standard_selling_price": standard_selling_price,
+                "last_customer_rate": last_customer_rate,
             })
 
         return response(
