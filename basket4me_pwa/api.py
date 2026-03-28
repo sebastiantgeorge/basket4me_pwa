@@ -1666,20 +1666,26 @@ def get_item_list(name=None, item_name=None, customer=None, limit_start=0, limit
                     except Exception:
                         pass
 
-                # Get last customer rate (most recent rate sold to this customer based on default UOM)
+                # Get last customer rate from SO and SI (whichever is most recent)
                 last_customer_rate = 0.0
                 if customer:
                     try:
                         last_rate = frappe.db.sql("""
-                            SELECT sii.rate
-                            FROM `tabSales Invoice Item` sii
-                            JOIN `tabSales Invoice` si ON si.name = sii.parent
-                            WHERE si.customer = %s AND sii.item_code = %s
-                              AND sii.uom = %s
-                              AND si.docstatus = 1
-                            ORDER BY si.posting_date DESC, si.creation DESC
-                            LIMIT 1
-                        """, (customer, item["name"], item.get("stock_uom", "Nos")), as_dict=True)
+                            SELECT rate, txn_date FROM (
+                                SELECT soi.rate, so2.transaction_date as txn_date, so2.creation
+                                FROM `tabSales Order Item` soi
+                                JOIN `tabSales Order` so2 ON so2.name = soi.parent
+                                WHERE so2.customer = %s AND soi.item_code = %s
+                                AND so2.docstatus != 2
+                                UNION ALL
+                                SELECT sii.rate, si.posting_date as txn_date, si.creation
+                                FROM `tabSales Invoice Item` sii
+                                JOIN `tabSales Invoice` si ON si.name = sii.parent
+                                WHERE si.customer = %s AND sii.item_code = %s
+                                AND si.docstatus = 1 AND si.is_return = 0
+                            ) combined
+                            ORDER BY txn_date DESC, creation DESC LIMIT 1
+                        """, (customer, item["name"], customer, item["name"]), as_dict=True)
                         if last_rate:
                             last_customer_rate = last_rate[0].get("rate") or 0.0
                     except Exception:
@@ -5102,16 +5108,25 @@ def get_price_list_items(price_list=None, item_code=None, item_name=None, name=N
             """, (ic, stock_uom), as_dict=True)
             item["standard_selling_price"] = std_result[0]["price_list_rate"] if std_result else 0.0
 
-            # Last Customer Rate (if customer param provided)
+            # Last Customer Rate from SO and SI (whichever is most recent)
             item["last_customer_rate"] = 0.0
             if customer:
                 last_rate = frappe.db.sql("""
-                    SELECT sii.rate FROM `tabSales Invoice Item` sii
-                    JOIN `tabSales Invoice` si ON si.name = sii.parent
-                    WHERE si.customer = %s AND sii.item_code = %s
-                    AND sii.uom = %s AND si.docstatus = 1
-                    ORDER BY si.posting_date DESC, si.creation DESC LIMIT 1
-                """, (customer, ic, stock_uom), as_dict=True)
+                    SELECT rate, txn_date FROM (
+                        SELECT soi.rate, so2.transaction_date as txn_date, so2.creation
+                        FROM `tabSales Order Item` soi
+                        JOIN `tabSales Order` so2 ON so2.name = soi.parent
+                        WHERE so2.customer = %s AND soi.item_code = %s
+                        AND so2.docstatus != 2
+                        UNION ALL
+                        SELECT sii.rate, si.posting_date as txn_date, si.creation
+                        FROM `tabSales Invoice Item` sii
+                        JOIN `tabSales Invoice` si ON si.name = sii.parent
+                        WHERE si.customer = %s AND sii.item_code = %s
+                        AND si.docstatus = 1 AND si.is_return = 0
+                    ) combined
+                    ORDER BY txn_date DESC, creation DESC LIMIT 1
+                """, (customer, ic, customer, ic), as_dict=True)
                 if last_rate:
                     item["last_customer_rate"] = last_rate[0].get("rate") or 0.0
 
@@ -7311,16 +7326,25 @@ def get_sales_order_detail(name=None):
             """, (ic, stock_uom), as_dict=True)
             standard_selling_price = std_result[0]["price_list_rate"] if std_result else 0.0
 
-            # Last Customer Rate from submitted Sales Invoices
+            # Last Customer Rate from SO and SI (whichever is most recent)
             last_customer_rate = 0.0
             if so.customer:
                 last_rate = frappe.db.sql("""
-                    SELECT sii.rate FROM `tabSales Invoice Item` sii
-                    JOIN `tabSales Invoice` si ON si.name = sii.parent
-                    WHERE si.customer = %s AND sii.item_code = %s
-                    AND sii.uom = %s AND si.docstatus = 1 AND si.is_return = 0
-                    ORDER BY si.posting_date DESC, si.creation DESC LIMIT 1
-                """, (so.customer, ic, stock_uom), as_dict=True)
+                    SELECT rate, txn_date FROM (
+                        SELECT soi.rate, so2.transaction_date as txn_date, so2.creation
+                        FROM `tabSales Order Item` soi
+                        JOIN `tabSales Order` so2 ON so2.name = soi.parent
+                        WHERE so2.customer = %s AND soi.item_code = %s
+                        AND so2.docstatus != 2
+                        UNION ALL
+                        SELECT sii.rate, si.posting_date as txn_date, si.creation
+                        FROM `tabSales Invoice Item` sii
+                        JOIN `tabSales Invoice` si ON si.name = sii.parent
+                        WHERE si.customer = %s AND sii.item_code = %s
+                        AND si.docstatus = 1 AND si.is_return = 0
+                    ) combined
+                    ORDER BY txn_date DESC, creation DESC LIMIT 1
+                """, (so.customer, ic, so.customer, ic), as_dict=True)
                 if last_rate:
                     last_customer_rate = last_rate[0].get("rate") or 0.0
 
