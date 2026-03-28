@@ -4993,26 +4993,57 @@ def get_price_list_items(price_list=None, item_code=None, item_name=None, name=N
                 ["item_name", "like", f"%{search}%"],
             ]
 
-        # Get disabled items to exclude
-        disabled_items = set(frappe.get_all("Item", filters={"disabled": 1}, pluck="name"))
+        # Build SQL to get only the latest Item Price per item_code+uom
+        conditions = ["ip.price_list = %s", "ip.selling = 1"]
+        values = [price_list]
 
-        items = frappe.get_all(
-            "Item Price",
-            filters=filters,
-            or_filters=or_filters,
-            fields=[
-                "name", "item_code", "item_name", "uom", "price_list_rate",
-                "currency", "valid_from", "valid_upto", "batch_no"
-            ],
-            order_by="item_code asc",
-            limit_start=_offset,
-            limit_page_length=_page_size
-        )
+        code_filter = name or item_code
+        if code_filter:
+            conditions.append("ip.item_code LIKE %s")
+            values.append(f"%{code_filter}%")
 
-        # Filter out disabled items
-        items = [item for item in items if item["item_code"] not in disabled_items]
+        if item_name:
+            conditions.append("ip.item_name LIKE %s")
+            values.append(f"%{item_name}%")
 
-        total_count = frappe.db.count("Item Price", filters=filters)
+        if search:
+            conditions.append("(ip.item_code LIKE %s OR ip.item_name LIKE %s)")
+            values.extend([f"%{search}%", f"%{search}%"])
+
+        # Exclude disabled items
+        conditions.append("NOT EXISTS (SELECT 1 FROM `tabItem` it WHERE it.name = ip.item_code AND it.disabled = 1)")
+
+        where_clause = " AND ".join(conditions)
+
+        # Get latest Item Price per item_code+uom (most recent valid_from)
+        count_sql = f"""
+            SELECT COUNT(*) FROM (
+                SELECT ip.item_code, ip.uom
+                FROM `tabItem Price` ip
+                WHERE {where_clause}
+                GROUP BY ip.item_code, ip.uom
+            ) as grouped
+        """
+        total_count = frappe.db.sql(count_sql, values)[0][0]
+
+        items_sql = f"""
+            SELECT ip.name, ip.item_code, ip.item_name, ip.uom, ip.price_list_rate,
+                   ip.currency, ip.valid_from, ip.valid_upto, ip.batch_no
+            FROM `tabItem Price` ip
+            INNER JOIN (
+                SELECT item_code, uom, MAX(valid_from) as max_valid_from
+                FROM `tabItem Price`
+                WHERE price_list = %s AND selling = 1
+                GROUP BY item_code, uom
+            ) latest ON ip.item_code = latest.item_code
+                AND COALESCE(ip.uom, '') = COALESCE(latest.uom, '')
+                AND ip.valid_from = latest.max_valid_from
+                AND ip.price_list = %s AND ip.selling = 1
+            WHERE {where_clause}
+            ORDER BY ip.item_code ASC
+            LIMIT %s OFFSET %s
+        """
+        items = frappe.db.sql(items_sql, [price_list, price_list] + values + [_page_size, _offset], as_dict=True)
 
         # Enrich each item with enhanced details
         for item in items:
