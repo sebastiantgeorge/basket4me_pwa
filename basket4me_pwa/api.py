@@ -7327,17 +7327,22 @@ def get_sales_order_detail(name=None):
             standard_selling_price = std_result[0]["price_list_rate"] if std_result else 0.0
 
             # Last Customer Rate from SO and SI (whichever is most recent)
+            # Also get the price list name and price list rate from that transaction
             last_customer_rate = 0.0
+            last_customer_price_list = None
+            last_customer_price_list_rate = 0.0
             if so.customer:
                 last_rate = frappe.db.sql("""
-                    SELECT rate, txn_date FROM (
-                        SELECT soi.rate, so2.transaction_date as txn_date, so2.creation
+                    SELECT rate, price_list, price_list_rate, txn_date FROM (
+                        SELECT soi.rate, so2.selling_price_list as price_list,
+                               soi.price_list_rate, so2.transaction_date as txn_date, so2.creation
                         FROM `tabSales Order Item` soi
                         JOIN `tabSales Order` so2 ON so2.name = soi.parent
                         WHERE so2.customer = %s AND soi.item_code = %s
                         AND so2.docstatus != 2
                         UNION ALL
-                        SELECT sii.rate, si.posting_date as txn_date, si.creation
+                        SELECT sii.rate, si.selling_price_list as price_list,
+                               sii.price_list_rate, si.posting_date as txn_date, si.creation
                         FROM `tabSales Invoice Item` sii
                         JOIN `tabSales Invoice` si ON si.name = sii.parent
                         WHERE si.customer = %s AND sii.item_code = %s
@@ -7347,6 +7352,8 @@ def get_sales_order_detail(name=None):
                 """, (so.customer, ic, so.customer, ic), as_dict=True)
                 if last_rate:
                     last_customer_rate = last_rate[0].get("rate") or 0.0
+                    last_customer_price_list = last_rate[0].get("price_list") or None
+                    last_customer_price_list_rate = last_rate[0].get("price_list_rate") or 0.0
 
             items_data.append({
                 "name": item.name,
@@ -7371,6 +7378,8 @@ def get_sales_order_detail(name=None):
                 "mrp": mrp,
                 "standard_selling_price": standard_selling_price,
                 "last_customer_rate": last_customer_rate,
+                "last_customer_price_list": last_customer_price_list,
+                "last_customer_price_list_rate": last_customer_price_list_rate,
             })
 
         return response(
@@ -8944,15 +8953,20 @@ def get_transaction_history(item_code=None, customer=None, doctype=None,
 
             where_clause = " AND ".join(conditions)
 
-            # Check if selling_price_list column exists
+            # Check if columns exist on this doctype
             price_list_field = "p.selling_price_list" if frappe.db.has_column(parent_dt, "selling_price_list") else "'' as selling_price_list"
+
+            # is_return only exists on Sales Invoice, not Sales Order
+            if parent_dt == "Sales Invoice":
+                transaction_type_expr = "CASE WHEN p.is_return = 1 THEN 'Sales Return' ELSE 'Sales Invoice' END"
+            else:
+                transaction_type_expr = f"'{parent_dt}'"
 
             query = f"""
                 SELECT
                     p.name as ref_no,
                     '{parent_dt}' as doc_type,
-                    CASE WHEN '{parent_dt}' = 'Sales Invoice' AND p.is_return = 1
-                        THEN 'Sales Return' ELSE '{parent_dt}' END as transaction_type,
+                    {transaction_type_expr} as transaction_type,
                     p.{date_field} as date,
                     p.customer,
                     p.customer_name,
