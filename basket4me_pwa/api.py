@@ -3712,7 +3712,7 @@ def create_sales_invoice_return(params):
 # Payment Entry Api
 
 @frappe.whitelist(methods="GET")
-def get_receipt_list(name=None, customer=None, status=None, search=None, page=1, page_size=20):
+def get_receipt_list(name=None, customer=None, status=None, search=None, from_date=None, to_date=None, page=1, page_size=20):
     try:
         filters = {"party_type": "Customer"}
         fields = [
@@ -3733,6 +3733,13 @@ def get_receipt_list(name=None, customer=None, status=None, search=None, page=1,
                 filters['docstatus'] = 1
             elif status == "Cancelled":
                 filters['docstatus'] = 2
+
+        if from_date and to_date:
+            filters['posting_date'] = ["between", [from_date, to_date]]
+        elif from_date:
+            filters['posting_date'] = [">=", from_date]
+        elif to_date:
+            filters['posting_date'] = ["<=", to_date]
 
         # Search by name or party_name
         or_filters = None
@@ -3756,7 +3763,9 @@ def get_receipt_list(name=None, customer=None, status=None, search=None, page=1,
             limit_page_length=page_size,
         )
 
-        return response("Receipt List", receipt_list, True, 200)
+        total_count = frappe.db.count("Payment Entry", filters=filters)
+
+        return response("Receipt List", {"receipts": receipt_list, "total_count": total_count, "page": page, "page_size": page_size}, True, 200)
     except Exception as exception:
         frappe.log_error(frappe.get_traceback())
         return response(str(exception), {}, False, 417)
