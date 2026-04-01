@@ -3712,12 +3712,25 @@ def create_sales_invoice_return(params):
 # Payment Entry Api
 
 @frappe.whitelist(methods="GET")
-def get_receipt_list(name=None, customer=None, status=None, search=None, from_date=None, to_date=None, page=1, page_size=20):
+def get_receipt_list(name=None, customer=None, status=None, search=None, from_date=None, to_date=None, payment_type=None, page=1, page_size=20):
+    """
+    Get list of Payment Entries (Receipts/Payments).
+
+    Query params:
+        name: Filter by exact PE name
+        customer: Filter by customer
+        status: Draft / Submitted / Cancelled
+        search: Search by name or party_name
+        from_date / to_date: Date range filter
+        payment_type: "Receive" (Receipt) or "Pay" (Payment) or None (all)
+        page / page_size: Pagination
+    """
     try:
         filters = {"party_type": "Customer"}
         fields = [
             'name', 'party', 'party_name', 'posting_date', 'paid_amount',
             'mode_of_payment', 'payment_type', 'docstatus', 'status', 'creation',
+            'reference_no', 'reference_date',
         ]
 
         if name:
@@ -3725,6 +3738,9 @@ def get_receipt_list(name=None, customer=None, status=None, search=None, from_da
 
         if customer:
             filters['party'] = customer
+
+        if payment_type:
+            filters['payment_type'] = payment_type
 
         if status:
             if status == "Draft":
@@ -4445,6 +4461,109 @@ def cancel_payment_entry(params):
         error_msg = str(e).replace('<', '').replace('>', '')
         return response(error_msg, {}, False, 417)
     
+
+@frappe.whitelist(methods="POST")
+def update_payment_entry(params):
+    """Update a draft Payment Entry."""
+    try:
+        if isinstance(params, str):
+            params = json.loads(params)
+
+        name = params.get("name")
+        if not name:
+            return response("Payment Entry name is required", {}, False, 400)
+
+        if not frappe.db.exists("Payment Entry", name):
+            return response(f"Payment Entry '{name}' not found", {}, False, 404)
+
+        pe = frappe.get_doc("Payment Entry", name)
+
+        if pe.docstatus != 0:
+            return response("Can only update Payment Entry in Draft state", {}, False, 400)
+
+        # Update allowed fields
+        if params.get("paid_amount") is not None:
+            pe.paid_amount = flt(params.get("paid_amount"))
+            pe.received_amount = flt(params.get("paid_amount"))
+
+        if params.get("mode_of_payment"):
+            pe.mode_of_payment = params.get("mode_of_payment")
+
+        if params.get("posting_date"):
+            pe.posting_date = params.get("posting_date")
+
+        if params.get("reference_no"):
+            pe.reference_no = params.get("reference_no")
+
+        if params.get("reference_date"):
+            pe.reference_date = params.get("reference_date")
+
+        if params.get("remarks"):
+            pe.remarks = params.get("remarks")
+
+        # Update invoice references if provided
+        if params.get("invoices") and isinstance(params.get("invoices"), list):
+            pe.references = []
+            for inv in params.get("invoices"):
+                pe.append("references", {
+                    "reference_doctype": inv.get("reference_doctype", "Sales Invoice"),
+                    "reference_name": inv.get("reference_name") or inv.get("invoice"),
+                    "allocated_amount": flt(inv.get("allocated_amount") or inv.get("amount")),
+                })
+
+        pe.save()
+        frappe.db.commit()
+
+        return response("Payment Entry updated successfully", {
+            "name": pe.name,
+            "docstatus": pe.docstatus,
+            "status": pe.status,
+            "paid_amount": pe.paid_amount,
+            "mode_of_payment": pe.mode_of_payment,
+        }, True, 200)
+
+    except Exception as e:
+        frappe.db.rollback()
+        frappe.log_error(frappe.get_traceback(), "Update Payment Entry Error")
+        return response(str(e), {}, False, 500)
+
+
+@frappe.whitelist(methods="POST")
+def submit_payment_entry(params):
+    """Submit a draft Payment Entry."""
+    try:
+        if isinstance(params, str):
+            params = json.loads(params)
+
+        name = params.get("name")
+        if not name:
+            return response("Payment Entry name is required", {}, False, 400)
+
+        if not frappe.db.exists("Payment Entry", name):
+            return response(f"Payment Entry '{name}' not found", {}, False, 404)
+
+        pe = frappe.get_doc("Payment Entry", name)
+
+        if pe.docstatus == 1:
+            return response(f"Payment Entry '{name}' is already submitted", {}, False, 400)
+        if pe.docstatus == 2:
+            return response(f"Payment Entry '{name}' is cancelled", {}, False, 400)
+
+        pe.submit()
+        frappe.db.commit()
+
+        return response("Payment Entry submitted successfully", {
+            "name": pe.name,
+            "docstatus": pe.docstatus,
+            "status": pe.status,
+            "paid_amount": pe.paid_amount,
+        }, True, 200)
+
+    except Exception as e:
+        frappe.db.rollback()
+        frappe.log_error(frappe.get_traceback(), "Submit Payment Entry Error")
+        return response(str(e), {}, False, 500)
+
 
 @frappe.whitelist(methods="POST")
 def create_material_request(params):
