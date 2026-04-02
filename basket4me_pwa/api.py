@@ -339,7 +339,7 @@ def get_customer_list_with_effective_price_list(name=None):
         if customer_list:
             return response("Enhanced Customer List", customer_list, True, 200)
         else:
-            return response("No Customer List", [], True, 204)
+            return response("No Customer List", [], True, 200)
             
     except Exception as exception:
         frappe.log_error(frappe.get_traceback())
@@ -1091,7 +1091,7 @@ def get_invoice_list(name=None, customer=None, status=None, search=None):
         if invoice_list:
             return response("Invoice List", invoice_list, True, 200)
         else:
-            return response("No Invoice List", [], True, 204)
+            return response("No Invoice List", [], True, 200)
     except Exception as exception:
         frappe.log_error(frappe.get_traceback())
         return response(str(exception), {}, False, 417)
@@ -1221,7 +1221,7 @@ def get_customer_list(name=None, mobile_no=None):
         if customer_list:
             return response("Customer List", customer_list, True, 200)
         else:
-            return response("No Customer List", [], True, 204)
+            return response("No Customer List", [], True, 200)
     except Exception as exception:
         frappe.log_error(frappe.get_traceback())
         return response(str(exception), {}, False, 417)
@@ -1754,7 +1754,7 @@ def get_item_list(name=None, item_name=None, customer=None, limit_start=0, limit
         if item_list:
             return response("Item List", item_list, True, 200)
         else:
-            return response("No items found", [], True, 204)
+            return response("No items found", [], True, 200)
 
     except Exception as exception:
         frappe.log_error(f"CRITICAL ERROR in get_item_list: {str(exception)}\n{frappe.get_traceback()}", "Get Item List Critical Error")
@@ -2705,7 +2705,7 @@ def get_warehouse_list(name=None):
         if warehouse_list:
             return response("Warehouse List", warehouse_list, True, 200)
         else:
-            return response("No Warehouse List", [], True, 204)
+            return response("No Warehouse List", [], True, 200)
     except Exception as exception:
         frappe.log_error(frappe.get_traceback())
         return response(str(exception), {}, False, 417)
@@ -3852,7 +3852,7 @@ def get_customer_invoices(customer=None, customer_name=None):
         if invoice_data:
             return response("Customer Invoice List", invoice_data, True, 200)
         else:
-            return response("No Outstanding Invoices Found", [], True, 204)
+            return response("No Outstanding Invoices Found", [], True, 200)
     except Exception as exception:
         frappe.log_error(frappe.get_traceback())
         return response(str(exception), {}, False, 417)
@@ -3919,7 +3919,7 @@ def customer_invoice_details(customer=None):
         if response_data["invoices"]:
             return response("Customer Invoice Details", response_data, True, 200)
         else:
-            return response("No Invoices Found for this Customer", response_data, True, 204)
+            return response("No Invoices Found for this Customer", response_data, True, 200)
     except Exception as exception:
         frappe.log_error(frappe.get_traceback())
         return response(str(exception), {}, False, 417)
@@ -4333,7 +4333,7 @@ def get_return_invoice_list(name=None, customer=None, status=None, search=None):
         if invoice_list:
             return response("Invoice List", invoice_list, True, 200)
         else:
-            return response("No Invoice List", [], True, 204)
+            return response("No Invoice List", [], True, 200)
     except Exception as exception:
         frappe.log_error(frappe.get_traceback())
         return response(str(exception), {}, False, 417)
@@ -4677,7 +4677,7 @@ def get_customer_group_list(name=None):
         if group_list:
             return response("Customer Group List", group_list, True, 200)
         else:
-            return response("No Customer Group List", [], True, 204)
+            return response("No Customer Group List", [], True, 200)
     except Exception as exception:
         frappe.log_error(frappe.get_traceback())
         return response(str(exception), {}, False, 417)
@@ -4750,7 +4750,7 @@ def get_material_request_list(name=None):
         if request_list:
             return response("Request List", request_list, True, 200)
         else:
-            return response("No Request List", [], True, 204)
+            return response("No Request List", [], True, 200)
     except Exception as exception:
         frappe.log_error(frappe.get_traceback())
         return response(str(exception), {}, False, 417)
@@ -4927,7 +4927,7 @@ def get_customer_group_list(name=None):
         if group_list:
             return response("Customer Group", group_list, True, 200)
         else:
-            return response("No Customer Group", [], True, 204)
+            return response("No Customer Group", [], True, 200)
     except Exception as exception:
         frappe.log_error(frappe.get_traceback())
         return response(str(exception), {}, False, 417)
@@ -5012,7 +5012,7 @@ def get_price_list():
         if price_lists:
             return response("Price List", price_lists, True, 200)
         else:
-            return response("No Price Lists found", [], True, 204)
+            return response("No Price Lists found", [], True, 200)
             
     except Exception as e:
         frappe.log_error(frappe.get_traceback(), "Get Price List Error")
