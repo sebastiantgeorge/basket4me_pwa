@@ -4191,6 +4191,20 @@ def create_payment_entry(params=None):
         
         paid_to_account = mode_doc.accounts[0].default_account
 
+        # Normalize invoice field names to support multiple formats
+        normalized_invoices = []
+        for inv in params["invoices"]:
+            normalized_invoices.append({
+                "invoice_id": inv.get("invoice_id") or inv.get("invoice") or inv.get("reference_name"),
+                "allocated_amount": flt(inv.get("allocated_amount") or inv.get("amount") or 0),
+            })
+        params["invoices"] = normalized_invoices
+
+        # Validate all invoice_ids are provided
+        for inv in params["invoices"]:
+            if not inv.get("invoice_id"):
+                return response("Missing required parameter: 'invoice_id' (or 'invoice' or 'reference_name') in invoices array", {}, False, 400)
+
         return_invoices = []
         non_return_invoices = []
         payment_entry = None  # Initialize to avoid unbound variable
