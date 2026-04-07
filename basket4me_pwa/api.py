@@ -4399,14 +4399,57 @@ def receipt_details(receipt_id=None):
         response_deductions = []
 
         for item in receipt.references:
-            response_items.append({
+            inv_data = {
                 "invoice_id": item.reference_name,
+                "name": item.reference_name,
                 "reference_doctype": item.reference_doctype,
                 "date": item.due_date,
                 "invoice_amount": item.total_amount,
                 "balance_amount": item.outstanding_amount,
                 "allocated_amount": item.allocated_amount,
-            })
+            }
+
+            # Enrich with invoice-level fields (same as get_invoice_list)
+            if item.reference_doctype == "Sales Invoice" and frappe.db.exists("Sales Invoice", item.reference_name):
+                si = frappe.db.get_value("Sales Invoice", item.reference_name,
+                    ["customer", "customer_name", "posting_date", "grand_total",
+                     "outstanding_amount", "status", "docstatus", "creation"],
+                    as_dict=True)
+                if si:
+                    inv_data.update({
+                        "customer": si.customer,
+                        "customer_name": si.customer_name,
+                        "posting_date": str(si.posting_date) if si.posting_date else None,
+                        "grand_total": si.grand_total,
+                        "outstanding_amount": si.outstanding_amount,
+                        "status": si.status,
+                        "docstatus": si.docstatus,
+                        "creation": str(si.creation) if si.creation else None,
+                        "mobile_no": frappe.db.get_value("Customer", si.customer, "mobile_no"),
+                    })
+
+                    # Compute return_status
+                    orig_qty = frappe.db.sql("""
+                        SELECT item_code, SUM(stock_qty) as qty FROM `tabSales Invoice Item`
+                        WHERE parent = %s GROUP BY item_code
+                    """, item.reference_name, as_dict=True)
+                    ret_qty = frappe.db.sql("""
+                        SELECT sii.item_code, SUM(ABS(sii.stock_qty)) as qty
+                        FROM `tabSales Invoice` si
+                        JOIN `tabSales Invoice Item` sii ON sii.parent = si.name
+                        WHERE si.is_return = 1 AND si.docstatus = 1 AND si.return_against = %s
+                        GROUP BY sii.item_code
+                    """, item.reference_name, as_dict=True)
+
+                    if not ret_qty:
+                        inv_data["return_status"] = "not_returned"
+                    else:
+                        orig_map = {r.item_code: flt(r.qty) for r in orig_qty}
+                        ret_map = {r.item_code: flt(r.qty) for r in ret_qty}
+                        all_fully = all(flt(ret_map.get(ic, 0)) >= flt(oq) - 0.01 for ic, oq in orig_map.items())
+                        inv_data["return_status"] = "fully_returned" if all_fully else "partially_returned"
+
+            response_items.append(inv_data)
 
         for deduction in receipt.deductions:
             response_deductions.append({
