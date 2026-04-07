@@ -4253,7 +4253,6 @@ def create_payment_entry(params=None):
 
             payment_entry.flags.ignore_permissions = True
             payment_entry.insert(ignore_permissions=True)
-            payment_entry.submit()
 
         if non_return_invoices:
             payment_entry = frappe.new_doc("Payment Entry")
@@ -4288,14 +4287,15 @@ def create_payment_entry(params=None):
 
             payment_entry.flags.ignore_permissions = True
             payment_entry.insert(ignore_permissions=True)
-            payment_entry.submit()
 
-        return response("Payment Entries Created Successfully", {
+        return response("Payment Entry created as Draft", {
             "receipt_id": payment_entry.name,
+            "docstatus": 0,
+            "status": "Draft",
             "mode_of_payment": mode_of_payment,
             "sales_person": sales_person,
             "total_amount": params["paid_amount"]
-        }, True, 201)
+        }, True, 200)
 
     except KeyError as ke:
         frappe.db.rollback()
