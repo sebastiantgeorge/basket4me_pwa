@@ -4111,28 +4111,25 @@ def create_payment_entry(params=None):
 
             # Enhanced Mode of Payment Selection Logic - Sales Person Based
             selected_mode_of_payment = params.get("mode_of_payment")
-            
+
             # Validate and determine mode of payment
             if selected_mode_of_payment:
-                # Check if selected mode is valid for this sales person
+                # Accept any valid ERPNext Mode of Payment OR one from Basket4Me Settings
                 valid_modes = []
-                
-                # Add sales person specific mode
                 if sales_person_details and sales_person_details.mode_of_payment:
                     valid_modes.append(sales_person_details.mode_of_payment)
-                
-                # Add universal modes from settings
                 for mode_detail in settings.mode_of_payment_details:
                     valid_modes.append(mode_detail.mode_of_payment)
-                
-                if selected_mode_of_payment not in valid_modes:
+
+                if selected_mode_of_payment in valid_modes or frappe.db.exists("Mode of Payment", selected_mode_of_payment):
+                    mode_of_payment = selected_mode_of_payment
+                else:
                     return response(f"Invalid mode of payment '{selected_mode_of_payment}'. Available modes: {', '.join(valid_modes)}", {}, False, 400)
-                
-                mode_of_payment = selected_mode_of_payment
             else:
-                # Default to sales person specific mode if no mode specified
-                if sales_person_details and sales_person_details.mode_of_payment:
-                    mode_of_payment = sales_person_details.mode_of_payment
+                # No mode specified - use configured modes only (never silently default to sales person name)
+                valid_modes = [m.mode_of_payment for m in settings.mode_of_payment_details]
+                if valid_modes:
+                    mode_of_payment = valid_modes[0]
                 else:
                     # Fallback to first universal mode if no sales person specific mode
                     if settings.mode_of_payment_details:
@@ -4165,24 +4162,16 @@ def create_payment_entry(params=None):
             selected_mode_of_payment = params.get("mode_of_payment")
 
             if selected_mode_of_payment:
-                if selected_mode_of_payment in valid_modes:
+                # Validate against both Basket4Me Settings modes AND ERPNext Mode of Payment list
+                if selected_mode_of_payment in valid_modes or frappe.db.exists("Mode of Payment", selected_mode_of_payment):
                     mode_of_payment = selected_mode_of_payment
                 else:
-                    # If exact match fails, use sales person's mode as default
-                    if sales_person_details and sales_person_details.mode_of_payment:
-                        mode_of_payment = sales_person_details.mode_of_payment
-                    elif valid_modes:
-                        mode_of_payment = valid_modes[0]
-                    else:
-                        return response(f"Invalid mode of payment '{selected_mode_of_payment}'. No modes configured.", {}, False, 400)
+                    return response(f"Invalid mode of payment '{selected_mode_of_payment}'. Available modes: {', '.join(valid_modes)}", {}, False, 400)
             else:
-                # Default: sales person mode > first universal mode
-                if sales_person_details and sales_person_details.mode_of_payment:
-                    mode_of_payment = sales_person_details.mode_of_payment
-                elif settings.mode_of_payment_details:
-                    mode_of_payment = settings.mode_of_payment_details[0].mode_of_payment
+                if valid_modes:
+                    mode_of_payment = valid_modes[0]
                 else:
-                    return response("No mode of payment configured in Basket4Me Settings", {}, False, 400)
+                    return response("No mode of payment configured. Please pass mode_of_payment parameter.", {}, False, 400)
         
         # Get account for selected mode of payment
         mode_doc = frappe.get_doc("Mode of Payment", mode_of_payment)
