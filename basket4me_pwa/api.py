@@ -4446,11 +4446,60 @@ def receipt_details(receipt_id=None):
                 "discount": deduction.amount,
             })
 
+        # Customer details for print receipt
+        customer_name = receipt.party
+        customer_address = None
+        customer_gstno = None
+        customer_outstanding = 0.0
+        customer_old_balance = 0.0
+
+        if customer_name:
+            # Get primary address
+            addr_name = frappe.db.get_value("Dynamic Link",
+                {"link_doctype": "Customer", "link_name": customer_name, "parenttype": "Address"},
+                "parent")
+            if addr_name:
+                addr = frappe.db.get_value("Address", addr_name,
+                    ["address_line1", "address_line2", "city", "state", "pincode", "country", "gstin"],
+                    as_dict=True)
+                if addr:
+                    parts = [addr.address_line1, addr.address_line2, addr.city, addr.state, addr.pincode, addr.country]
+                    customer_address = ", ".join([p for p in parts if p])
+                    customer_gstno = addr.gstin
+
+            # If no GSTIN from address, check customer tax_id
+            if not customer_gstno:
+                customer_gstno = frappe.db.get_value("Customer", customer_name, "tax_id")
+
+            # Total outstanding
+            customer_outstanding = frappe.db.sql("""
+                SELECT COALESCE(SUM(outstanding_amount), 0)
+                FROM `tabSales Invoice`
+                WHERE customer = %s AND docstatus = 1 AND outstanding_amount > 0
+            """, customer_name)[0][0] or 0.0
+
+            # Old balance = outstanding before this receipt's posting date
+            if receipt.posting_date:
+                customer_old_balance = frappe.db.sql("""
+                    SELECT COALESCE(SUM(outstanding_amount), 0)
+                    FROM `tabSales Invoice`
+                    WHERE customer = %s AND docstatus = 1
+                    AND posting_date < %s AND outstanding_amount > 0
+                """, (customer_name, receipt.posting_date))[0][0] or 0.0
+
+        # Received by
+        received_by = frappe.db.get_value("User", receipt.owner, "full_name") or receipt.owner
+
         response_data = {
             "receipt_id": receipt_id,
             "posting_date": str(receipt.posting_date) if receipt.posting_date else None,
             "customer": receipt.party,
             "customer_name": receipt.party_name,
+            "customer_address": customer_address,
+            "customer_gstno": customer_gstno,
+            "customer_old_balance": customer_old_balance,
+            "customer_outstanding": customer_outstanding,
+            "received_by": received_by,
             "paid_amount": receipt.paid_amount,
             "mode_of_payment": receipt.mode_of_payment,
             "payment_type": receipt.payment_type,
@@ -4507,6 +4556,36 @@ def cancel_payment_entry(params):
         error_msg = str(e).replace('<', '').replace('>', '')
         return response(error_msg, {}, False, 417)
     
+
+@frappe.whitelist(methods="POST")
+def delete_payment_entry(params):
+    """Delete a draft or cancelled Payment Entry."""
+    try:
+        if isinstance(params, str):
+            params = json.loads(params)
+
+        name = params.get("name")
+        if not name:
+            return response("Payment Entry name is required", {}, False, 400)
+
+        if not frappe.db.exists("Payment Entry", name):
+            return response(f"Payment Entry '{name}' not found", {}, False, 404)
+
+        pe = frappe.get_doc("Payment Entry", name)
+
+        if pe.docstatus == 1:
+            return response(f"Payment Entry '{name}' is submitted. Cancel it before deleting.", {}, False, 400)
+
+        frappe.delete_doc("Payment Entry", name, ignore_permissions=True)
+        frappe.db.commit()
+
+        return response(f"Payment Entry '{name}' deleted successfully", {"name": name}, True, 200)
+
+    except Exception as e:
+        frappe.db.rollback()
+        frappe.log_error(frappe.get_traceback(), "Delete Payment Entry Error")
+        return response(str(e), {}, False, 500)
+
 
 @frappe.whitelist(methods="POST")
 def update_payment_entry(params):

@@ -184,14 +184,22 @@ def get_user_details(sid=None, user_id=None):
             company_name = frappe.defaults.get_user_default("Company", user_id) or frappe.defaults.get_global_default("company")
 
         company_default_price_list = None
+        company_address = None
+        company_gst_no = None
         if company_name:
             company_fields = ["company_logo"]
             if frappe.db.has_column("Company", "default_price_list"):
                 company_fields.append("default_price_list")
+            # GST number - check common field names
+            for gst_field in ["tax_id", "gstin", "custom_gstin"]:
+                if frappe.db.has_column("Company", gst_field):
+                    company_fields.append(gst_field)
+                    break
             company_doc = frappe.db.get_value("Company", company_name, company_fields, as_dict=True)
             if company_doc:
                 company_logo = company_doc.get("company_logo")
                 company_default_price_list = company_doc.get("default_price_list")
+                company_gst_no = company_doc.get("tax_id") or company_doc.get("gstin") or company_doc.get("custom_gstin")
             # Fallback: get from Selling Settings
             if not company_default_price_list:
                 try:
@@ -200,6 +208,21 @@ def get_user_details(sid=None, user_id=None):
                     pass
             if company_logo and not company_logo.startswith("http"):
                 company_logo = frappe.utils.get_url(company_logo)
+
+            # Company address - get primary address
+            try:
+                addr_name = frappe.db.get_value("Dynamic Link",
+                    {"link_doctype": "Company", "link_name": company_name, "parenttype": "Address"},
+                    "parent")
+                if addr_name:
+                    addr = frappe.db.get_value("Address", addr_name,
+                        ["address_line1", "address_line2", "city", "state", "pincode", "country"],
+                        as_dict=True)
+                    if addr:
+                        parts = [addr.address_line1, addr.address_line2, addr.city, addr.state, addr.pincode, addr.country]
+                        company_address = ", ".join([p for p in parts if p])
+            except Exception:
+                pass
 
         # Get doctype permissions for the user
         doctypes_to_check = [
@@ -243,6 +266,8 @@ def get_user_details(sid=None, user_id=None):
             "user_image": user_image,
             "company_name": company_name,
             "company_logo": company_logo,
+            "company_address": company_address,
+            "company_gst_no": company_gst_no,
             "company_default_price_list": company_default_price_list,
             "employee_id": frappe.get_value("Employee", {'user_id': user_doc.name}),
             "permissions": permissions,
