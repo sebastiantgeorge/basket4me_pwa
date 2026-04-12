@@ -1152,6 +1152,46 @@ def get_invoice_list(name=None, customer=None, status=None, search=None,
                 for inv in invoice_list:
                     inv['mobile_no'] = mobile_map.get(inv.get('customer'), '')
 
+        # ── Enrich with customer_address, route, created_by, items ──
+        if invoice_list:
+            for inv in invoice_list:
+                cust = inv.get('customer')
+
+                # Customer address
+                addr_name = frappe.db.get_value("Dynamic Link",
+                    {"link_doctype": "Customer", "link_name": cust, "parenttype": "Address"},
+                    "parent") if cust else None
+                if addr_name:
+                    addr = frappe.db.get_value("Address", addr_name,
+                        ["address_line1", "address_line2", "city", "state", "pincode", "country"],
+                        as_dict=True)
+                    if addr:
+                        parts = [addr.address_line1, addr.address_line2, addr.city, addr.state, addr.pincode, addr.country]
+                        inv["customer_address"] = ", ".join([p for p in parts if p])
+                    else:
+                        inv["customer_address"] = None
+                else:
+                    inv["customer_address"] = None
+
+                # Route
+                inv["route"] = frappe.db.get_value("Customer", cust, "custom_route") if cust else None
+
+                # Created by
+                owner = inv.get("owner") or frappe.db.get_value("Sales Invoice", inv["name"], "owner")
+                inv["created_by"] = frappe.db.get_value("User", owner, "full_name") or owner if owner else None
+
+                # Items array
+                inv["items"] = frappe.get_all(
+                    "Sales Invoice Item",
+                    filters={"parent": inv["name"]},
+                    fields=[
+                        "item_code", "item_name", "qty", "uom", "stock_uom",
+                        "rate", "amount", "price_list_rate",
+                        "discount_percentage", "discount_amount",
+                        "conversion_factor"
+                    ]
+                )
+
         return response("Invoice List", {
             "invoices": invoice_list or [],
             "total_count": total_count if 'total_count' in dir() else len(invoice_list or []),
