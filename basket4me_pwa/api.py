@@ -943,8 +943,25 @@ def get_customer_invoice_aging():
 
 
 @frappe.whitelist(methods="GET")
-def get_invoice_list(name=None, customer=None, status=None, search=None):
+def get_invoice_list(name=None, customer=None, status=None, search=None,
+                     from_date=None, to_date=None, route=None,
+                     page_number=1, page_size=20):
+    """
+    List Sales Invoices with filters and pagination.
+
+    Query params:
+        name: Filter by exact SI name
+        customer: Filter by customer
+        status: Filter by status (Draft, Unpaid, Paid, Overdue, Cancelled)
+        search: Search by name or customer_name
+        from_date / to_date: Date range filter on posting_date
+        route: Filter by Customer Route
+        page_number / page_size: Pagination
+    """
     try:
+        _page_size = int(page_size or 20)
+        _offset = (int(page_number or 1) - 1) * _page_size
+
         sales_person = frappe.db.get_value("Sales Person", {"custom_user": frappe.session.user}, "name")
 
         filters = {"is_return": 0}
@@ -957,14 +974,28 @@ def get_invoice_list(name=None, customer=None, status=None, search=None):
             filters['customer'] = customer
 
         if status:
-            filters['status'] = status
+            if status == "Draft":
+                filters['docstatus'] = 0
+            elif status == "Cancelled":
+                filters['docstatus'] = 2
+            else:
+                filters['docstatus'] = 1
+                filters['status'] = status
+
+        # Route filter - get customers belonging to this route
+        route_customers = None
+        if route:
+            route_customers = frappe.get_all("Customer", filters={"custom_route": route}, pluck="name")
+            if route_customers:
+                if not customer:
+                    filters["customer"] = ["in", route_customers]
+            else:
+                return response("Invoice List", {"invoices": [], "total_count": 0, "page_number": int(page_number or 1), "page_size": _page_size}, True, 200)
 
         # Check if override is enabled
         override_enabled = should_override_sales_team()
 
         if override_enabled:
-            # If override is enabled, bypass Frappe's permission system entirely
-            # Use raw SQL query to get all invoices without permission filtering
             conditions = ["si.is_return = 0"]
             values = []
 
@@ -974,15 +1005,35 @@ def get_invoice_list(name=None, customer=None, status=None, search=None):
             if customer:
                 conditions.append("si.customer = %s")
                 values.append(customer)
+            elif route_customers:
+                placeholders = ",".join(["%s"] * len(route_customers))
+                conditions.append(f"si.customer IN ({placeholders})")
+                values.extend(route_customers)
             if status:
-                conditions.append("si.status = %s")
-                values.append(status)
+                if status == "Draft":
+                    conditions.append("si.docstatus = 0")
+                elif status == "Cancelled":
+                    conditions.append("si.docstatus = 2")
+                else:
+                    conditions.append("si.docstatus = 1")
+                    conditions.append("si.status = %s")
+                    values.append(status)
             if search:
                 conditions.append("(si.name LIKE %s OR si.customer_name LIKE %s)")
                 values.append(f"%{search}%")
                 values.append(f"%{search}%")
+            if from_date:
+                conditions.append("si.posting_date >= %s")
+                values.append(from_date)
+            if to_date:
+                conditions.append("si.posting_date <= %s")
+                values.append(to_date)
 
             where_clause = " AND ".join(conditions)
+
+            # Get total count
+            count_sql = f"SELECT COUNT(*) FROM `tabSales Invoice` si WHERE {where_clause}"
+            total_count = frappe.db.sql(count_sql, values)[0][0]
 
             sql = f"""
                 SELECT si.name, si.customer, si.customer_name, si.posting_date, si.grand_total, si.outstanding_amount, si.status, si.docstatus, si.creation,
@@ -991,8 +1042,10 @@ def get_invoice_list(name=None, customer=None, status=None, search=None):
                 LEFT JOIN `tabCustomer` c ON si.customer = c.name
                 WHERE {where_clause}
                 ORDER BY si.creation DESC
+                LIMIT %s OFFSET %s
             """
-            
+            values.extend([_page_size, _offset])
+
             invoice_list = frappe.db.sql(sql, values, as_dict=True)
             
         else:
@@ -1020,8 +1073,19 @@ def get_invoice_list(name=None, customer=None, status=None, search=None):
                     # No invoices for this salesperson
                     filters['name'] = ['in', []]
 
-            # Use Frappe's get_list with sales team restrictions
-            invoice_list = frappe.db.get_list("Sales Invoice", filters=filters, fields=fields)
+            # Add date filters
+            if from_date and to_date:
+                filters["posting_date"] = ["between", [from_date, to_date]]
+            elif from_date:
+                filters["posting_date"] = [">=", from_date]
+            elif to_date:
+                filters["posting_date"] = ["<=", to_date]
+
+            total_count = frappe.db.count("Sales Invoice", filters=filters)
+
+            # Use Frappe's get_list with sales team restrictions and pagination
+            invoice_list = frappe.db.get_list("Sales Invoice", filters=filters, fields=fields,
+                order_by="creation desc", limit_start=_offset, limit_page_length=_page_size)
 
         # Apply text search filter (LIKE match on name and customer_name)
         if search and invoice_list:
@@ -1088,10 +1152,12 @@ def get_invoice_list(name=None, customer=None, status=None, search=None):
                 for inv in invoice_list:
                     inv['mobile_no'] = mobile_map.get(inv.get('customer'), '')
 
-        if invoice_list:
-            return response("Invoice List", invoice_list, True, 200)
-        else:
-            return response("No Invoice List", [], True, 200)
+        return response("Invoice List", {
+            "invoices": invoice_list or [],
+            "total_count": total_count if 'total_count' in dir() else len(invoice_list or []),
+            "page_number": int(page_number or 1),
+            "page_size": _page_size,
+        }, True, 200)
     except Exception as exception:
         frappe.log_error(frappe.get_traceback())
         return response(str(exception), {}, False, 417)
