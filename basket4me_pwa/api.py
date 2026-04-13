@@ -2460,15 +2460,16 @@ def create_sales_invoice(params):
 
             latest_item_price = item_price[0]["price_list_rate"] if item_price else None
 
-            # Determine the rate based on is_free_item flag
-            if is_free_item:
-                rate = 0  # Set rate to 0 for free items
-            elif latest_item_price is not None:
-                rate = latest_item_price
-            else:
-                rate = provided_rate
+            # price_list_rate is the reference rate from Item Price
+            price_list_rate = flt(latest_item_price) if latest_item_price is not None else flt(provided_rate)
 
-            price_list_rate = flt(rate)  # Original price before discount
+            # Actual rate: use frontend-provided rate; fallback to price list rate
+            if is_free_item:
+                rate = 0
+            elif provided_rate is not None and str(provided_rate).strip() != "":
+                rate = flt(provided_rate)
+            else:
+                rate = price_list_rate
 
             # Handle both discount_percentage and discount_amount from mobile app
             provided_discount_percentage = flt(item.get("discount_percentage", 0))
@@ -2488,7 +2489,7 @@ def create_sales_invoice(params):
                 discount_amount = 0
 
             # Calculate the discounted rate
-            discounted_rate = price_list_rate - discount_amount
+            discounted_rate = rate - discount_amount
 
             item_data = {
                 "item_code": item_code,
@@ -2499,12 +2500,12 @@ def create_sales_invoice(params):
                 "cost_center": sales_person_details.cost_center,
                 "discount_percentage": discount_percentage,
                 "discount_amount": discount_amount,
-                "rate": discounted_rate,  # Use the discounted rate
-                "stock_uom_rate": discounted_rate,  # Set stock UOM rate same as discounted rate
-                "price_list_rate": price_list_rate,  # Original price before discount
-                "base_rate": discounted_rate,  # Set base rate same as discounted rate
-                "base_price_list_rate": price_list_rate,  # Original price before discount
-                "is_free_item": is_free_item  # Set the is_free_item field in the invoice item
+                "rate": discounted_rate,
+                "stock_uom_rate": discounted_rate,
+                "price_list_rate": price_list_rate,
+                "base_rate": discounted_rate,
+                "base_price_list_rate": price_list_rate,
+                "is_free_item": is_free_item
             }
 
             # Handle batch selection for pharmaceutical/batch-tracked items
@@ -2524,7 +2525,8 @@ def create_sales_invoice(params):
                 "discount_percentage": discount_percentage,
                 "price_list_rate": price_list_rate,
                 "rate": discounted_rate,
-                "is_free_item": is_free_item  # Include is_free_item in the response
+                "is_free_item": is_free_item,
+                "batch_no": batch_no
             }
             response_items.append(response_item)
 
@@ -2697,14 +2699,16 @@ def update_sales_invoice(params):
 
                 latest_item_price = item_price[0]["price_list_rate"] if item_price else None
 
+                # price_list_rate is the reference rate from Item Price
+                price_list_rate = flt(latest_item_price) if latest_item_price is not None else flt(provided_rate)
+
+                # Actual rate: use frontend-provided rate; fallback to price list rate
                 if is_free_item:
                     rate = 0
-                elif latest_item_price is not None:
-                    rate = latest_item_price
+                elif provided_rate is not None and str(provided_rate).strip() != "":
+                    rate = flt(provided_rate)
                 else:
-                    rate = provided_rate
-
-                price_list_rate = flt(rate)
+                    rate = price_list_rate
 
                 provided_discount_percentage = flt(item.get("discount_percentage", 0))
                 provided_discount_amount = flt(item.get("discount_amount", 0))
@@ -2719,7 +2723,7 @@ def update_sales_invoice(params):
                     discount_percentage = 0
                     discount_amount = 0
 
-                discounted_rate = price_list_rate - discount_amount
+                discounted_rate = rate - discount_amount
 
                 item_data = {
                     "item_code": item_code,
@@ -2738,6 +2742,12 @@ def update_sales_invoice(params):
                     "is_free_item": is_free_item
                 }
 
+                # Handle batch selection
+                batch_no = item.get("batch_no")
+                if batch_no:
+                    item_data["use_serial_batch_fields"] = 1
+                    item_data["batch_no"] = batch_no
+
                 sales_invoice.append("items", item_data)
                 response_items.append({
                     "item_code": item_code,
@@ -2748,7 +2758,8 @@ def update_sales_invoice(params):
                     "discount_percentage": discount_percentage,
                     "price_list_rate": price_list_rate,
                     "rate": discounted_rate,
-                    "is_free_item": is_free_item
+                    "is_free_item": is_free_item,
+                    "batch_no": batch_no
                 })
 
             sales_invoice.run_method("set_missing_values")
@@ -3302,11 +3313,17 @@ def invoice_details(invoice_id=None):
                 "item_name": item.item_name,
                 "description": strip_html_tags(item.description) if item.description else item.description,
                 "uom": item.uom,
+                "stock_uom": item.stock_uom,
+                "conversion_factor": item.conversion_factor,
                 "qty": item.qty,
                 "rate": item.rate,
+                "price_list_rate": item.price_list_rate,
+                "discount_percentage": item.discount_percentage,
+                "discount_amount": item.discount_amount,
+                "is_free_item": item.is_free_item,
+                "batch_no": getattr(item, "batch_no", None),
                 "tax_rate": tax_rate if tax_rate else 0.0,
                 "tax_amount": item.tax_amount,
-                "discount_amount": item.discount_amount,
                 "amount": item.amount
             })
         
