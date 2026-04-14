@@ -255,6 +255,27 @@ def get_user_details(sid=None, user_id=None):
                     "amend": False, "print": False,
                 }
 
+        # Company bank details
+        company_bank_name = None
+        company_bank_acc_no = None
+        company_bank_ifsc = None
+        company_bank_branch = None
+        if company_name:
+            try:
+                default_bank = frappe.db.get_value("Company", company_name, "default_bank_account")
+                if default_bank:
+                    bank_doc = frappe.db.get_value("Bank Account", default_bank,
+                        ["bank", "bank_account_no", "branch_code"], as_dict=True)
+                    if bank_doc:
+                        company_bank_name = bank_doc.get("bank")
+                        company_bank_acc_no = bank_doc.get("bank_account_no")
+                        company_bank_ifsc = bank_doc.get("branch_code")
+                        # Get branch from Bank if available
+                        if company_bank_name:
+                            company_bank_branch = frappe.db.get_value("Bank", company_bank_name, "swift_number") or None
+            except Exception:
+                pass
+
         user_data = {
             "sid": sid if sid else frappe.session.sid,
             "api_key": user_doc.api_key,
@@ -268,6 +289,10 @@ def get_user_details(sid=None, user_id=None):
             "company_logo": company_logo,
             "company_address": company_address,
             "company_gst_no": company_gst_no,
+            "company_bank_name": company_bank_name,
+            "company_bank_acc_no": company_bank_acc_no,
+            "company_bank_ifsc": company_bank_ifsc,
+            "company_bank_branch": company_bank_branch,
             "company_default_price_list": company_default_price_list,
             "employee_id": frappe.get_value("Employee", {'user_id': user_doc.name}),
             "permissions": permissions,

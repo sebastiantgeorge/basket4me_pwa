@@ -1251,10 +1251,46 @@ def get_invoice_detail(name=None):
                 "has_batch_no": frappe.db.get_value("Item", item.item_code, "has_batch_no") or 0,
             })
 
+        # Customer address
+        customer_address = None
+        customer_gstno = None
+        if doc.customer:
+            addr_name = frappe.db.get_value("Dynamic Link",
+                {"link_doctype": "Customer", "link_name": doc.customer, "parenttype": "Address"},
+                "parent")
+            if addr_name:
+                addr = frappe.db.get_value("Address", addr_name,
+                    ["address_line1", "address_line2", "city", "state", "pincode", "country", "gstin"],
+                    as_dict=True)
+                if addr:
+                    parts = [addr.address_line1, addr.address_line2, addr.city, addr.state, addr.pincode, addr.country]
+                    customer_address = ", ".join([p for p in parts if p])
+                    customer_gstno = addr.gstin
+            if not customer_gstno:
+                customer_gstno = frappe.db.get_value("Customer", doc.customer, "tax_id")
+
+        # Taxes array
+        taxes_data = []
+        for tax in doc.taxes:
+            taxes_data.append({
+                "name": tax.name,
+                "charge_type": tax.charge_type,
+                "account_head": tax.account_head,
+                "description": tax.description,
+                "rate": tax.rate,
+                "tax_code": getattr(tax, "tax_code", None),
+                "taxable_amount": getattr(tax, "total", 0),
+                "tax_amount": tax.tax_amount,
+                "total": tax.total,
+                "included_in_print_rate": tax.included_in_print_rate,
+            })
+
         data = {
             "name": doc.name,
             "customer": doc.customer,
             "customer_name": doc.customer_name,
+            "customer_address": customer_address,
+            "customer_gstno": customer_gstno,
             "posting_date": str(doc.posting_date) if doc.posting_date else None,
             "due_date": str(doc.due_date) if doc.due_date else None,
             "docstatus": doc.docstatus,
@@ -1266,6 +1302,7 @@ def get_invoice_detail(name=None):
             "is_return": doc.is_return,
             "return_against": doc.return_against,
             "items": items,
+            "taxes": taxes_data,
             "total": doc.total,
             "net_total": doc.net_total,
             "total_taxes_and_charges": doc.total_taxes_and_charges,
