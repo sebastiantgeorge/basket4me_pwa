@@ -102,15 +102,23 @@ def generate_keys(user):
     user_details = frappe.get_doc("User", user)
     api_secret = frappe.generate_hash(length=15)
 
-    # if not user_details.api_key:
-    #     api_key = frappe.generate_hash(length=15)
-    #     user_details.api_key = api_key
     api_key = frappe.generate_hash(length=15)
     user_details.api_key = api_key if not user_details.api_key else user_details.api_key
     user_details.api_secret = api_secret
-    user_details.save(ignore_permissions=True)
-    frappe.db.commit()
 
+    # Bypass link validation - some users have references to deleted Workspaces etc.
+    user_details.flags.ignore_links = True
+    user_details.flags.ignore_validate = True
+    user_details.flags.ignore_permissions = True
+
+    try:
+        user_details.save(ignore_permissions=True)
+    except frappe.LinkValidationError:
+        # Fallback: update api_key/api_secret directly via DB if save fails due to link issues
+        frappe.db.set_value("User", user, "api_key", user_details.api_key, update_modified=False)
+        frappe.db.set_value("User", user, "api_secret", frappe.utils.password.encrypt(api_secret), update_modified=False)
+
+    frappe.db.commit()
     return api_secret
 
 
