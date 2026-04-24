@@ -2466,6 +2466,14 @@ def create_sales_invoice(params):
         sales_invoice.cost_center = sales_person_details.cost_center
         sales_invoice.selling_price_list = effective_price_list
         sales_invoice.custom_mobile_app = 1
+        # Van sale app flag - indicates SI was created from van sale flow
+        is_van_sale = params.get("is_van_sale") or params.get("from_van_sale") or 0
+        if is_van_sale:
+            if frappe.db.has_column("Sales Invoice", "custom_van_sale"):
+                sales_invoice.custom_van_sale = 1
+            # Also write to custom_from_van_sale if that field exists
+            if frappe.db.has_column("Sales Invoice", "custom_from_van_sale"):
+                sales_invoice.custom_from_van_sale = 1
         sales_invoice.set_posting_time = 1
         sales_invoice.company = sales_person_details.company
 
@@ -8236,7 +8244,9 @@ def get_customer_visits(customer=None, from_date=None, to_date=None):
 
 @frappe.whitelist(methods="GET")
 def get_customer_list_v2(name=None, mobile_no=None, territory=None, route=None,
-                         visit_status=None, page_number=1, page_size=20,
+                         visit_status=None, sort_by=None,
+                         user_lat=None, user_lng=None,
+                         page_number=1, page_size=20,
                          limit_start=None, limit_page_length=None):
     """
     Enhanced customer list with route/territory, visit status, outstanding balance.
@@ -8247,6 +8257,8 @@ def get_customer_list_v2(name=None, mobile_no=None, territory=None, route=None,
         territory: Filter by territory (route)
         route: Alias for territory
         visit_status: "visited" | "not_visited" | None (all)
+        sort_by: "name" | "route" | "distance" (default: name)
+        user_lat / user_lng: User GPS location (returns distance_km per customer and enables sort_by=distance)
         page_number: Page number (default: 1)
         page_size: Records per page (default: 20)
         limit_start / limit_page_length: Legacy pagination (overrides page_number/page_size if provided)
@@ -8288,15 +8300,27 @@ def get_customer_list_v2(name=None, mobile_no=None, territory=None, route=None,
             if frappe.db.has_column("Customer", f):
                 fields.append(f)
 
+        # Determine order_by based on sort_by
+        if sort_by == "route":
+            order_by_clause = "custom_route asc, customer_name asc" if frappe.db.has_column("Customer", "custom_route") else "territory asc, customer_name asc"
+        elif sort_by == "distance":
+            # For distance sort, fetch ALL matching rows (no pagination yet) — we sort in Python
+            order_by_clause = "customer_name asc"
+        else:  # default: name
+            order_by_clause = "customer_name asc"
+
+        # If sorting by distance, fetch all rows and paginate after sort
+        fetch_all_for_distance = (sort_by == "distance" and user_lat and user_lng)
+
         customers = frappe.get_all(
             "Customer",
             filters=filters,
             or_filters=or_filters,
             fields=fields,
             ignore_permissions=override_enabled,
-            limit_start=_offset,
-            limit_page_length=_page_size,
-            order_by="customer_name asc",
+            limit_start=0 if fetch_all_for_distance else _offset,
+            limit_page_length=0 if fetch_all_for_distance else _page_size,
+            order_by=order_by_clause,
         )
 
         # Get today's visited customers
@@ -8314,6 +8338,22 @@ def get_customer_list_v2(name=None, mobile_no=None, territory=None, route=None,
         for row in visit_rows:
             visited_set.add(row[0])
 
+        # Haversine distance helper
+        def _haversine_km(lat1, lng1, lat2, lng2):
+            import math
+            try:
+                lat1, lng1, lat2, lng2 = float(lat1), float(lng1), float(lat2), float(lng2)
+            except (TypeError, ValueError):
+                return None
+            R = 6371.0
+            dlat = math.radians(lat2 - lat1)
+            dlng = math.radians(lng2 - lng1)
+            a = math.sin(dlat / 2) ** 2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlng / 2) ** 2
+            c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+            return round(R * c, 2)
+
+        has_user_location = user_lat is not None and user_lng is not None and str(user_lat).strip() != "" and str(user_lng).strip() != ""
+
         result = []
         for c in customers:
             c["visit_status"] = "visited" if c["name"] in visited_set else "not_visited"
@@ -8324,6 +8364,12 @@ def get_customer_list_v2(name=None, mobile_no=None, territory=None, route=None,
                 WHERE customer = %s AND docstatus = 1 AND outstanding_amount > 0
             """, c["name"])[0][0] or 0
 
+            # Distance calculation if user location provided
+            if has_user_location and c.get("custom_latitude") and c.get("custom_longitude"):
+                c["distance_km"] = _haversine_km(user_lat, user_lng, c["custom_latitude"], c["custom_longitude"])
+            else:
+                c["distance_km"] = None
+
             # Apply visit_status filter
             if visit_status:
                 if visit_status == "visited" and c["visit_status"] != "visited":
@@ -8333,6 +8379,13 @@ def get_customer_list_v2(name=None, mobile_no=None, territory=None, route=None,
             result.append(c)
 
         total_count = frappe.db.count("Customer", filters=filters or {})
+
+        # Apply distance sort + manual pagination if sort_by=distance
+        if fetch_all_for_distance:
+            result.sort(key=lambda x: (x.get("distance_km") is None, x.get("distance_km") or 0))
+            total_count = len(result)
+            result = result[_offset:_offset + _page_size]
+
         return response(
             "Customer list fetched",
             {
@@ -8340,6 +8393,7 @@ def get_customer_list_v2(name=None, mobile_no=None, territory=None, route=None,
                 "total_count": total_count,
                 "page_number": int(page_number or 1),
                 "page_size": _page_size,
+                "sort_by": sort_by or "name",
             },
             True, 200,
         )
@@ -9434,5 +9488,352 @@ def get_transaction_history(item_code=None, customer=None, doctype=None,
         }, True, 200)
     except Exception as e:
         frappe.log_error(title="Get Transaction History Error", message=str(e))
+        return response(str(e), {}, False, 500)
+
+
+@frappe.whitelist(methods="GET")
+def get_pending_sales_order_items(customer=None, as_on_date=None):
+    """
+    Get pending sales order items for a customer (for van sale app).
+
+    Returns submitted Sales Orders (docstatus=1) that are NOT Closed/Cancelled,
+    with items where qty > (delivered_qty + billed_qty).
+
+    Query params:
+        customer: Customer name (required)
+        as_on_date: Filter SOs with transaction_date <= this date (default: today)
+    """
+    try:
+        if not customer:
+            return response("customer is required", {}, False, 400)
+
+        as_on_date = as_on_date or nowdate()
+
+        # Get submitted, open SOs
+        sales_orders = frappe.get_all(
+            "Sales Order",
+            filters={
+                "customer": customer,
+                "docstatus": 1,
+                "status": ["not in", ["Closed", "Cancelled", "Completed"]],
+                "transaction_date": ["<=", as_on_date],
+                "per_billed": ["<", 100],
+            },
+            fields=[
+                "name", "customer", "customer_name", "transaction_date",
+                "delivery_date", "status", "grand_total", "selling_price_list",
+                "per_delivered", "per_billed", "currency",
+            ],
+            order_by="transaction_date asc, name asc",
+            limit_page_length=0,
+        )
+
+        if not sales_orders:
+            return response("No pending sales orders", {
+                "customer": customer,
+                "as_on_date": as_on_date,
+                "pending_orders": [],
+                "items_summary": [],
+                "total_pending_amount": 0,
+                "total_pending_qty": 0,
+            }, True, 200)
+
+        so_names = [so["name"] for so in sales_orders]
+
+        # Get pending items (qty not fully delivered AND not fully billed)
+        item_rows = frappe.db.sql("""
+            SELECT
+                soi.parent as sales_order,
+                soi.name as row_name,
+                soi.item_code,
+                soi.item_name,
+                soi.description,
+                soi.uom,
+                soi.stock_uom,
+                soi.conversion_factor,
+                soi.qty as ordered_qty,
+                soi.delivered_qty,
+                COALESCE(soi.billed_amt, 0) as billed_amt,
+                soi.rate,
+                soi.price_list_rate,
+                soi.amount,
+                soi.discount_percentage,
+                soi.discount_amount,
+                soi.warehouse,
+                so.transaction_date,
+                so.delivery_date,
+                so.selling_price_list
+            FROM `tabSales Order Item` soi
+            INNER JOIN `tabSales Order` so ON so.name = soi.parent
+            WHERE soi.parent IN %(so_names)s
+              AND (flt(soi.qty) - flt(COALESCE(soi.delivered_qty, 0))) > 0.001
+        """, {"so_names": tuple(so_names)}, as_dict=True)
+
+        # Build detailed pending items
+        detailed_items = []
+        items_summary_map = {}
+        total_pending_qty = 0
+        total_pending_amount = 0
+
+        for row in item_rows:
+            ordered = flt(row["ordered_qty"])
+            delivered = flt(row["delivered_qty"])
+            pending_qty = ordered - delivered
+
+            if pending_qty <= 0.001:
+                continue
+
+            pending_amount = pending_qty * flt(row["rate"])
+
+            detailed_item = {
+                "sales_order": row["sales_order"],
+                "row_name": row["row_name"],
+                "item_code": row["item_code"],
+                "item_name": row["item_name"],
+                "description": row["description"],
+                "uom": row["uom"],
+                "stock_uom": row["stock_uom"],
+                "conversion_factor": row["conversion_factor"],
+                "ordered_qty": ordered,
+                "delivered_qty": delivered,
+                "pending_qty": pending_qty,
+                "rate": row["rate"],
+                "price_list_rate": row["price_list_rate"],
+                "amount": row["amount"],
+                "pending_amount": pending_amount,
+                "discount_percentage": row["discount_percentage"],
+                "discount_amount": row["discount_amount"],
+                "warehouse": row["warehouse"],
+                "transaction_date": str(row["transaction_date"]) if row["transaction_date"] else None,
+                "delivery_date": str(row["delivery_date"]) if row["delivery_date"] else None,
+                "selling_price_list": row["selling_price_list"],
+            }
+            detailed_items.append(detailed_item)
+
+            total_pending_qty += pending_qty
+            total_pending_amount += pending_amount
+
+            # Aggregate item-wise summary
+            key = (row["item_code"], row["uom"])
+            if key not in items_summary_map:
+                items_summary_map[key] = {
+                    "item_code": row["item_code"],
+                    "item_name": row["item_name"],
+                    "uom": row["uom"],
+                    "stock_uom": row["stock_uom"],
+                    "conversion_factor": row["conversion_factor"],
+                    "total_ordered_qty": 0,
+                    "total_delivered_qty": 0,
+                    "total_pending_qty": 0,
+                    "total_pending_amount": 0,
+                    "sales_orders": [],
+                }
+            summary = items_summary_map[key]
+            summary["total_ordered_qty"] += ordered
+            summary["total_delivered_qty"] += delivered
+            summary["total_pending_qty"] += pending_qty
+            summary["total_pending_amount"] += pending_amount
+            if row["sales_order"] not in summary["sales_orders"]:
+                summary["sales_orders"].append(row["sales_order"])
+
+        return response("Pending sales order items fetched", {
+            "customer": customer,
+            "as_on_date": as_on_date,
+            "pending_orders": sales_orders,
+            "pending_items": detailed_items,
+            "items_summary": list(items_summary_map.values()),
+            "total_pending_qty": total_pending_qty,
+            "total_pending_amount": total_pending_amount,
+            "sales_order_count": len(sales_orders),
+        }, True, 200)
+
+    except Exception as e:
+        frappe.log_error(title="Get Pending Sales Order Items Error", message=str(e))
+        return response(str(e), {}, False, 500)
+
+
+@frappe.whitelist(methods="POST")
+def get_price_list_items_bulk(params=None):
+    """
+    Bulk fetch price list items for a specific list of item_codes (no pagination).
+    Used when user changes price list after adding items.
+
+    Body:
+        price_list: Price List name (required)
+        item_codes: Array of item codes (required)
+        customer: Optional, for last_customer_rate
+    """
+    try:
+        if isinstance(params, str):
+            params = json.loads(params)
+        if not params:
+            params = frappe.local.form_dict
+
+        price_list = params.get("price_list")
+        item_codes = params.get("item_codes") or params.get("items") or []
+        customer = params.get("customer")
+
+        if isinstance(item_codes, str):
+            item_codes = json.loads(item_codes)
+
+        if not price_list:
+            return response("price_list is required", {}, False, 400)
+        if not item_codes or not isinstance(item_codes, list):
+            return response("item_codes (array) is required", {}, False, 400)
+
+        # Exclude disabled items
+        disabled_items = set(frappe.get_all("Item", filters={"disabled": 1}, pluck="name"))
+        wanted_codes = [ic for ic in item_codes if ic not in disabled_items]
+
+        if not wanted_codes:
+            return response("No items available", {
+                "items": [], "price_list": price_list, "total_count": 0
+            }, True, 200)
+
+        # Fetch latest Item Price per item_code+uom
+        placeholders = ",".join(["%s"] * len(wanted_codes))
+        items_sql = f"""
+            SELECT ip.name, ip.item_code, ip.item_name, ip.uom, ip.price_list_rate,
+                   ip.currency, ip.valid_from, ip.valid_upto, ip.batch_no
+            FROM `tabItem Price` ip
+            INNER JOIN (
+                SELECT item_code, uom, MAX(valid_from) as max_valid_from
+                FROM `tabItem Price`
+                WHERE price_list = %s AND selling = 1 AND item_code IN ({placeholders})
+                GROUP BY item_code, uom
+            ) latest ON ip.item_code = latest.item_code
+                AND COALESCE(ip.uom, '') = COALESCE(latest.uom, '')
+                AND ip.valid_from = latest.max_valid_from
+                AND ip.price_list = %s AND ip.selling = 1
+            WHERE ip.item_code IN ({placeholders})
+            ORDER BY FIELD(ip.item_code, {placeholders})
+        """
+        query_values = [price_list] + wanted_codes + [price_list] + wanted_codes + wanted_codes
+        items = frappe.db.sql(items_sql, query_values, as_dict=True)
+
+        # Enrich each item (same pattern as get_price_list_items)
+        enriched = []
+        for item in items:
+            ic = item["item_code"]
+            stock_uom = frappe.db.get_value("Item", ic, "stock_uom") or "Nos"
+            item["default_uom"] = stock_uom
+
+            uom_details = frappe.db.sql("""
+                SELECT uom, conversion_factor
+                FROM `tabUOM Conversion Detail`
+                WHERE parent = %s AND parenttype = 'Item'
+                ORDER BY idx ASC
+            """, ic, as_dict=True) or [{"uom": stock_uom, "conversion_factor": 1.0}]
+
+            uoms = []
+            for ud in uom_details:
+                uom_name = ud.get("uom")
+                rate = frappe.db.sql("""
+                    SELECT price_list_rate FROM `tabItem Price`
+                    WHERE selling = 1 AND item_code = %s AND price_list = %s
+                    AND (uom = %s OR uom IS NULL OR uom = '')
+                    ORDER BY CASE WHEN uom = %s THEN 0 ELSE 1 END, valid_from DESC LIMIT 1
+                """, (ic, price_list, uom_name, uom_name), as_dict=True)
+                uoms.append({
+                    "uom": uom_name,
+                    "conversion_factor": ud.get("conversion_factor", 1.0),
+                    "rate": rate[0]["price_list_rate"] if rate else 0.0,
+                })
+            item["uoms"] = uoms
+
+            mrp_result = frappe.db.sql("""
+                SELECT price_list_rate FROM `tabItem Price`
+                WHERE selling = 1 AND item_code = %s AND price_list = 'MRP'
+                AND (uom = %s OR uom IS NULL OR uom = '')
+                ORDER BY valid_from DESC LIMIT 1
+            """, (ic, stock_uom), as_dict=True)
+            item["mrp"] = mrp_result[0]["price_list_rate"] if mrp_result else 0.0
+
+            std_result = frappe.db.sql("""
+                SELECT price_list_rate FROM `tabItem Price`
+                WHERE selling = 1 AND item_code = %s AND price_list = 'Standard Selling'
+                AND (uom = %s OR uom IS NULL OR uom = '')
+                ORDER BY valid_from DESC LIMIT 1
+            """, (ic, stock_uom), as_dict=True)
+            item["standard_selling_price"] = std_result[0]["price_list_rate"] if std_result else 0.0
+
+            # Last customer rate (SO + SI)
+            item["last_customer_rate"] = 0.0
+            if customer:
+                last_rate = frappe.db.sql("""
+                    SELECT rate FROM (
+                        SELECT soi.rate, so2.transaction_date as txn_date, so2.creation
+                        FROM `tabSales Order Item` soi
+                        JOIN `tabSales Order` so2 ON so2.name = soi.parent
+                        WHERE so2.customer = %s AND soi.item_code = %s AND so2.docstatus != 2
+                        UNION ALL
+                        SELECT sii.rate, si.posting_date as txn_date, si.creation
+                        FROM `tabSales Invoice Item` sii
+                        JOIN `tabSales Invoice` si ON si.name = sii.parent
+                        WHERE si.customer = %s AND sii.item_code = %s
+                        AND si.docstatus = 1 AND si.is_return = 0
+                    ) combined
+                    ORDER BY txn_date DESC, creation DESC LIMIT 1
+                """, (customer, ic, customer, ic), as_dict=True)
+                if last_rate:
+                    item["last_customer_rate"] = last_rate[0].get("rate") or 0.0
+
+            # Available stock
+            item["available_qty"] = 0.0
+            try:
+                sales_person = frappe.db.get_value("Sales Person", {"custom_user": frappe.session.user}, "name")
+                settings = get_basket4me_settings()
+                warehouse = None
+                if sales_person and settings:
+                    for detail in settings.sales_person_details:
+                        if detail.sales_person == sales_person:
+                            warehouse = detail.warehouse
+                            break
+                if warehouse:
+                    item["available_qty"] = flt(frappe.db.get_value("Bin",
+                        {"item_code": ic, "warehouse": warehouse}, "actual_qty") or 0)
+                else:
+                    total_qty = frappe.db.sql("""
+                        SELECT COALESCE(SUM(actual_qty), 0) FROM `tabBin` WHERE item_code = %s
+                    """, ic)
+                    item["available_qty"] = flt(total_qty[0][0]) if total_qty else 0.0
+            except Exception:
+                pass
+
+            enriched.append(item)
+
+        # Include requested items that have no price list entry (return with price 0)
+        found_codes = {i["item_code"] for i in enriched}
+        missing = [ic for ic in wanted_codes if ic not in found_codes]
+        for ic in missing:
+            stock_uom = frappe.db.get_value("Item", ic, "stock_uom") or "Nos"
+            item_name = frappe.db.get_value("Item", ic, "item_name") or ic
+            enriched.append({
+                "name": None,
+                "item_code": ic,
+                "item_name": item_name,
+                "uom": stock_uom,
+                "price_list_rate": 0.0,
+                "currency": None,
+                "valid_from": None,
+                "valid_upto": None,
+                "batch_no": None,
+                "default_uom": stock_uom,
+                "uoms": [{"uom": stock_uom, "conversion_factor": 1.0, "rate": 0.0}],
+                "mrp": 0.0,
+                "standard_selling_price": 0.0,
+                "last_customer_rate": 0.0,
+                "available_qty": 0.0,
+                "not_in_price_list": True,
+            })
+
+        return response("Price List items fetched (bulk)", {
+            "items": enriched,
+            "price_list": price_list,
+            "total_count": len(enriched),
+        }, True, 200)
+
+    except Exception as e:
+        frappe.log_error(title="Get Price List Items Bulk Error", message=str(e))
         return response(str(e), {}, False, 500)
 
