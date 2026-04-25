@@ -98,6 +98,24 @@ def generate_device_id(user, device_id):
         user_deveice_id = user_details.device_id
     return user_deveice_id
 
+def _get_allow_negative_stock(company_name=None):
+    """
+    Returns True if negative stock is allowed.
+    Checks Company-level setting first (custom_allow_negative_stock if exists),
+    falls back to global Stock Settings.allow_negative_stock.
+    """
+    try:
+        # Company-level override (if a custom field exists)
+        if company_name and frappe.db.has_column("Company", "custom_allow_negative_stock"):
+            val = frappe.db.get_value("Company", company_name, "custom_allow_negative_stock")
+            if val is not None:
+                return bool(val)
+        # Global Stock Settings
+        return bool(frappe.db.get_single_value("Stock Settings", "allow_negative_stock") or 0)
+    except Exception:
+        return False
+
+
 def generate_keys(user):
     user_details = frappe.get_doc("User", user)
     api_secret = frappe.generate_hash(length=15)
@@ -302,6 +320,7 @@ def get_user_details(sid=None, user_id=None):
             "company_bank_ifsc": company_bank_ifsc,
             "company_bank_branch": company_bank_branch,
             "company_default_price_list": company_default_price_list,
+            "allow_negative_stock": _get_allow_negative_stock(company_name),
             "employee_id": frappe.get_value("Employee", {'user_id': user_doc.name}),
             "permissions": permissions,
         }

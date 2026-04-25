@@ -2467,13 +2467,9 @@ def create_sales_invoice(params):
         sales_invoice.selling_price_list = effective_price_list
         sales_invoice.custom_mobile_app = 1
         # Van sale app flag - indicates SI was created from van sale flow
-        is_van_sale = params.get("is_van_sale") or params.get("from_van_sale") or 0
-        if is_van_sale:
-            if frappe.db.has_column("Sales Invoice", "custom_van_sale"):
-                sales_invoice.custom_van_sale = 1
-            # Also write to custom_from_van_sale if that field exists
-            if frappe.db.has_column("Sales Invoice", "custom_from_van_sale"):
-                sales_invoice.custom_from_van_sale = 1
+        is_van_sale = 1 if params.get("is_van_sale") or params.get("from_van_sale") else 0
+        if is_van_sale and frappe.db.has_column("Sales Invoice", "custom_is_van_sale"):
+            sales_invoice.custom_is_van_sale = 1
         sales_invoice.set_posting_time = 1
         sales_invoice.company = sales_person_details.company
 
@@ -7132,6 +7128,10 @@ def create_sales_order(params):
         if payment_type:
             so.custom_payment_type = payment_type
         so.custom_mobile_app = 1
+        # Van sale app flag - indicates SO was created from van sale flow
+        is_van_sale = 1 if params.get("is_van_sale") or params.get("from_van_sale") else 0
+        if is_van_sale and frappe.db.has_column("Sales Order", "custom_is_van_sale"):
+            so.custom_is_van_sale = 1
 
         response_items = []
         for item in items:
