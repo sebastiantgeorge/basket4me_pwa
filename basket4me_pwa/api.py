@@ -8246,10 +8246,15 @@ def get_customer_visits(customer=None, from_date=None, to_date=None):
 def get_customer_list_v2(name=None, mobile_no=None, territory=None, route=None,
                          visit_status=None, sort_by=None,
                          user_lat=None, user_lng=None,
+                         include_balance=None,
                          page_number=1, page_size=20,
                          limit_start=None, limit_page_length=None):
     """
-    Enhanced customer list with route/territory, visit status, outstanding balance.
+    Enhanced customer list with route/territory, visit status.
+
+    Outstanding balance is NOT included by default for performance.
+    Use the dedicated /get_customer_outstanding endpoint for balance,
+    or pass include_balance=1 to fetch balances in batch (single SQL query).
 
     Args:
         name: Search by name/ID
@@ -8259,6 +8264,7 @@ def get_customer_list_v2(name=None, mobile_no=None, territory=None, route=None,
         visit_status: "visited" | "not_visited" | None (all)
         sort_by: "name" | "route" | "distance" (default: name)
         user_lat / user_lng: User GPS location (returns distance_km per customer and enables sort_by=distance)
+        include_balance: "1" to include outstanding_balance per customer (batched, single SQL)
         page_number: Page number (default: 1)
         page_size: Records per page (default: 20)
         limit_start / limit_page_length: Legacy pagination (overrides page_number/page_size if provided)
@@ -8354,15 +8360,28 @@ def get_customer_list_v2(name=None, mobile_no=None, territory=None, route=None,
 
         has_user_location = user_lat is not None and user_lng is not None and str(user_lat).strip() != "" and str(user_lng).strip() != ""
 
+        # Batch fetch outstanding balances ONLY if requested (single SQL, not per-customer)
+        balance_map = {}
+        if str(include_balance or "").lower() in ("1", "true", "yes"):
+            customer_names = [c["name"] for c in customers]
+            if customer_names:
+                placeholders = ",".join(["%s"] * len(customer_names))
+                rows = frappe.db.sql(f"""
+                    SELECT customer, COALESCE(SUM(outstanding_amount), 0) as balance
+                    FROM `tabSales Invoice`
+                    WHERE customer IN ({placeholders})
+                      AND docstatus = 1 AND outstanding_amount > 0
+                    GROUP BY customer
+                """, customer_names, as_dict=True)
+                balance_map = {r["customer"]: flt(r["balance"]) for r in rows}
+
         result = []
         for c in customers:
             c["visit_status"] = "visited" if c["name"] in visited_set else "not_visited"
-            # Outstanding balance
-            c["outstanding_balance"] = frappe.db.sql("""
-                SELECT COALESCE(SUM(outstanding_amount), 0)
-                FROM `tabSales Invoice`
-                WHERE customer = %s AND docstatus = 1 AND outstanding_amount > 0
-            """, c["name"])[0][0] or 0
+
+            # Outstanding balance — only set when include_balance was requested
+            if balance_map or str(include_balance or "").lower() in ("1", "true", "yes"):
+                c["outstanding_balance"] = balance_map.get(c["name"], 0)
 
             # Distance calculation if user location provided
             if has_user_location and c.get("custom_latitude") and c.get("custom_longitude"):
@@ -8446,6 +8465,79 @@ def get_customer_balance_summary(customer=None):
         )
     except Exception as e:
         frappe.log_error(title="Customer Balance Summary Error", message=str(e))
+        return response(str(e), {}, False, 500)
+
+
+@frappe.whitelist(methods=["GET", "POST"])
+def get_customer_outstanding(customer=None, customers=None):
+    """
+    Get outstanding balance for one or more customers.
+
+    Lightweight endpoint — meant to be called separately from get_customer_list_v2
+    (which no longer includes outstanding_balance by default for performance).
+
+    Query/body params (any of):
+        customer: single customer name (string)
+        customers: array or comma-separated string of customer names
+
+    Response:
+        Single customer: { customer, outstanding_balance }
+        Multiple customers: { balances: [ { customer, outstanding_balance } ], total_count }
+    """
+    try:
+        # Normalize input — accept single, array, comma-separated string
+        if customers is None and customer is None:
+            # Try parsing JSON body
+            try:
+                body = frappe.parse_json(frappe.request.get_data().decode()) if hasattr(frappe, "request") and frappe.request else None
+                if body:
+                    customer = body.get("customer") or customer
+                    customers = body.get("customers") or customers
+            except Exception:
+                pass
+
+        if isinstance(customers, str):
+            try:
+                customers = json.loads(customers)
+            except Exception:
+                customers = [c.strip() for c in customers.split(",") if c.strip()]
+
+        if not customers and customer:
+            customers = [customer]
+
+        if not customers or not isinstance(customers, list):
+            return response("customer or customers (array) is required", {}, False, 400)
+
+        # Single batched SQL — fast even for 100s of customers
+        placeholders = ",".join(["%s"] * len(customers))
+        rows = frappe.db.sql(f"""
+            SELECT customer, COALESCE(SUM(outstanding_amount), 0) as balance
+            FROM `tabSales Invoice`
+            WHERE customer IN ({placeholders})
+              AND docstatus = 1 AND outstanding_amount > 0
+            GROUP BY customer
+        """, customers, as_dict=True)
+        balance_map = {r["customer"]: flt(r["balance"]) for r in rows}
+
+        balances = [
+            {"customer": c, "outstanding_balance": balance_map.get(c, 0)}
+            for c in customers
+        ]
+
+        # Single-customer convenience response
+        if len(customers) == 1:
+            return response("Customer outstanding balance", {
+                "customer": customers[0],
+                "outstanding_balance": balance_map.get(customers[0], 0),
+            }, True, 200)
+
+        return response("Customer outstanding balances", {
+            "balances": balances,
+            "total_count": len(balances),
+        }, True, 200)
+
+    except Exception as e:
+        frappe.log_error(title="Get Customer Outstanding Error", message=str(e))
         return response(str(e), {}, False, 500)
 
 
