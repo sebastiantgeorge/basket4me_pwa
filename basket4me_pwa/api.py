@@ -9072,7 +9072,8 @@ def get_delivery_note_list(name=None, customer=None, status=None, search=None,
         dns = frappe.get_all(
             "Delivery Note", filters=filters, or_filters=or_filters,
             fields=["name", "customer", "customer_name", "posting_date", "docstatus",
-                     "status", "total", "grand_total", "currency", "per_billed"],
+                     "status", "total", "grand_total", "currency", "per_billed",
+                     "customer_address", "creation", "owner"],
             order_by="creation desc",
             limit_start=int(limit_start), limit_page_length=int(limit_page_length),
         )
@@ -9083,6 +9084,35 @@ def get_delivery_note_list(name=None, customer=None, status=None, search=None,
         total_customers = len(set(d["customer"] for d in dns))
 
         for d in dns:
+            cust = d.get("customer")
+
+            # Customer address — resolve from linked Address doctype
+            addr_display = None
+            addr_link = d.get("customer_address")
+            if not addr_link and cust:
+                addr_link = frappe.db.get_value("Dynamic Link",
+                    {"link_doctype": "Customer", "link_name": cust, "parenttype": "Address"},
+                    "parent")
+            if addr_link:
+                addr = frappe.db.get_value("Address", addr_link,
+                    ["address_line1", "address_line2", "city", "state", "pincode", "country"],
+                    as_dict=True)
+                if addr:
+                    parts = [addr.address_line1, addr.address_line2, addr.city, addr.state, addr.pincode, addr.country]
+                    addr_display = ", ".join([p for p in parts if p])
+            d["customer_address"] = addr_display
+
+            # Route from Customer
+            d["route"] = frappe.db.get_value("Customer", cust, "custom_route") if cust else None
+
+            # Created by — full name of owner
+            owner = d.get("owner")
+            d["created_by"] = (frappe.db.get_value("User", owner, "full_name") or owner) if owner else None
+
+            # Created date (string version of creation)
+            d["created_date"] = str(d.get("creation"))[:10] if d.get("creation") else None
+            d["creation"] = str(d.get("creation")) if d.get("creation") else None
+
             d["items"] = frappe.get_all("Delivery Note Item", filters={"parent": d["name"]},
                 fields=["item_code", "item_name", "qty", "uom", "rate", "amount"])
 
