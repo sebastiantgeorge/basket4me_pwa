@@ -1819,12 +1819,13 @@ def get_item_list(name=None, item_name=None, customer=None, search=None,
 
                         price_value = price[0]["price_list_rate"] if price else 0.0
                         cf = uom_detail.get("conversion_factor", 1)
-                        uoms_with_prices.append({"uom": uom, "price": price_value, "conversion_factor": cf})
-                        
+                        # Match get_price_list_items shape: {uom, conversion_factor, rate}
+                        uoms_with_prices.append({"uom": uom, "conversion_factor": cf, "rate": price_value})
+
                     except Exception as e:
                         frappe.log_error(f"Error getting price for {item['name']} - {uom_detail}: {str(e)}", "Item List Error")
                         # Add a default entry to prevent empty UOM list
-                        uoms_with_prices.append({"uom": "error", "price": 0.0, "conversion_factor": 1})
+                        uoms_with_prices.append({"uom": "error", "conversion_factor": 1, "rate": 0.0})
 
                 # Get tax rate safely
                 tax_rate = 0.0
@@ -1908,33 +1909,78 @@ def get_item_list(name=None, item_name=None, customer=None, search=None,
                 except Exception:
                     pass
 
-                # Set item properties safely
-                item["default_uom"] = item.get("stock_uom", "Nos")
+                # Get latest Item Price record for default UOM (for price_list_rate, currency,
+                # valid_from, valid_upto, batch_no — match get_price_list_items shape)
+                default_uom = item.get("stock_uom", "Nos")
+                price_list_rate = 0.0
+                currency = None
+                valid_from = None
+                valid_upto = None
+                batch_no = None
+                ip_name = None
+                try:
+                    ip_row = frappe.db.sql("""
+                        SELECT name, price_list_rate, currency, valid_from, valid_upto, batch_no
+                        FROM `tabItem Price`
+                        WHERE selling = 1 AND item_code = %s AND price_list = %s
+                        AND (uom = %s OR uom IS NULL OR uom = '')
+                        ORDER BY CASE WHEN uom = %s THEN 0 ELSE 1 END, valid_from DESC, creation DESC
+                        LIMIT 1
+                    """, (item["name"], effective_price_list, default_uom, default_uom), as_dict=True)
+                    if ip_row:
+                        r = ip_row[0]
+                        ip_name = r.get("name")
+                        price_list_rate = r.get("price_list_rate") or 0.0
+                        currency = r.get("currency")
+                        valid_from = str(r.get("valid_from")) if r.get("valid_from") else None
+                        valid_upto = str(r.get("valid_upto")) if r.get("valid_upto") else None
+                        batch_no = r.get("batch_no")
+                except Exception:
+                    pass
+
+                # Set item properties safely — aligned with get_price_list_items shape
+                item["item_code"] = item["name"]  # Item.name is the item_code
+                item["uom"] = default_uom
+                item["default_uom"] = default_uom
+                item["price_list_rate"] = price_list_rate
+                item["currency"] = currency
+                item["valid_from"] = valid_from
+                item["valid_upto"] = valid_upto
+                item["batch_no"] = batch_no
                 item["uoms"] = uoms_with_prices
+                item["mrp"] = mrp
+                item["standard_selling_price"] = standard_selling_price
+                item["last_customer_rate"] = last_customer_rate
+                item["available_qty"] = available_qty
+                # Extra fields kept for backward-compat (not in get_price_list_items)
                 item["tax_rate"] = tax_rate
                 item["is_tax_included"] = include_tax
-                item["available_qty"] = available_qty
                 item["effective_price_list"] = effective_price_list
                 item["valuation_rate"] = valuation_rate
                 item["last_purchase_rate"] = last_purchase_rate
-                item["last_customer_rate"] = last_customer_rate
-                item["mrp"] = mrp
-                item["standard_selling_price"] = standard_selling_price
 
             except Exception as e:
                 frappe.log_error(f"Error processing item {item.get('name', 'unknown')}: {str(e)}", "Item List Error")
-                # Set safe defaults
-                item["default_uom"] = item.get("stock_uom", "Nos")
+                # Set safe defaults — match get_price_list_items shape
+                default_uom = item.get("stock_uom", "Nos")
+                item["item_code"] = item.get("name")
+                item["uom"] = default_uom
+                item["default_uom"] = default_uom
+                item["price_list_rate"] = 0.0
+                item["currency"] = None
+                item["valid_from"] = None
+                item["valid_upto"] = None
+                item["batch_no"] = None
                 item["uoms"] = []
+                item["mrp"] = 0.0
+                item["standard_selling_price"] = 0.0
+                item["last_customer_rate"] = 0.0
+                item["available_qty"] = 0
                 item["tax_rate"] = 0.0
                 item["is_tax_included"] = include_tax
-                item["available_qty"] = 0
                 item["effective_price_list"] = effective_price_list
                 item["valuation_rate"] = 0.0
                 item["last_purchase_rate"] = 0.0
-                item["last_customer_rate"] = 0.0
-                item["mrp"] = 0.0
-                item["standard_selling_price"] = 0.0
 
         if item_list:
             return response("Item List", {
