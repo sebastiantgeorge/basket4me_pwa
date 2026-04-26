@@ -1650,8 +1650,24 @@ def get_item_by_barcode(barcode=None):
 
 
 @frappe.whitelist(methods="GET")
-def get_item_list(name=None, item_name=None, customer=None, limit_start=0, limit_page_length=20):
+def get_item_list(name=None, item_name=None, customer=None, search=None,
+                  page_number=1, page_size=20,
+                  limit_start=None, limit_page_length=None):
+    """
+    List enabled mobile-app items with pagination.
+
+    Supports both pagination styles:
+        page_number / page_size  (preferred)
+        limit_start / limit_page_length  (legacy)
+    """
     try:
+        # Normalize pagination — page_number/page_size takes precedence unless legacy supplied
+        _page_size = int(limit_page_length or page_size or 20)
+        if limit_start is not None:
+            _offset = int(limit_start)
+        else:
+            _offset = (int(page_number or 1) - 1) * _page_size
+
         filters = {"custom_allow_mobile_app": 1, "disabled": 0}
         fields = ['name', 'item_name', "description", "stock_uom", "has_batch_no"]
 
@@ -1663,17 +1679,41 @@ def get_item_list(name=None, item_name=None, customer=None, limit_start=0, limit
             if not item_list:
                 filters['name'] = ["like", f"%{name}%"]
                 item_list = frappe.db.get_list("Item", filters=filters, fields=fields,
-                                             limit_start=int(limit_start),
-                                             limit_page_length=int(limit_page_length))
+                                             limit_start=_offset,
+                                             limit_page_length=_page_size)
         elif item_name:
             filters['item_name'] = ["like", f"%{item_name}%"]
             item_list = frappe.db.get_list("Item", filters=filters, fields=fields,
-                                         limit_start=int(limit_start),
-                                         limit_page_length=int(limit_page_length))
+                                         limit_start=_offset,
+                                         limit_page_length=_page_size)
+        elif search:
+            # Search across name and item_name
+            or_filters = [
+                ["name", "like", f"%{search}%"],
+                ["item_name", "like", f"%{search}%"],
+            ]
+            item_list = frappe.db.get_list("Item", filters=filters, or_filters=or_filters,
+                                         fields=fields,
+                                         limit_start=_offset,
+                                         limit_page_length=_page_size)
         else:
             item_list = frappe.db.get_list("Item", filters=filters, fields=fields,
-                                         limit_start=int(limit_start),
-                                         limit_page_length=int(limit_page_length))
+                                         limit_start=_offset,
+                                         limit_page_length=_page_size)
+
+        # Compute total_count for pagination — same filter set, no limit
+        if name and not isinstance(filters.get('name'), list):
+            # Exact-match path matched (1 result) — total_count = 1
+            total_count = len(item_list)
+        elif search:
+            total_count = frappe.db.count("Item", filters=filters or {}) if not search else \
+                frappe.db.sql(
+                    "SELECT COUNT(*) FROM `tabItem` WHERE custom_allow_mobile_app = 1 AND disabled = 0 "
+                    "AND (name LIKE %s OR item_name LIKE %s)",
+                    (f"%{search}%", f"%{search}%")
+                )[0][0]
+        else:
+            total_count = frappe.db.count("Item", filters=filters or {})
         
         # Get settings safely
         include_tax = 0
@@ -1897,9 +1937,19 @@ def get_item_list(name=None, item_name=None, customer=None, limit_start=0, limit
                 item["standard_selling_price"] = 0.0
 
         if item_list:
-            return response("Item List", item_list, True, 200)
+            return response("Item List", {
+                "items": item_list,
+                "total_count": total_count,
+                "page_number": int(page_number or 1),
+                "page_size": _page_size,
+            }, True, 200)
         else:
-            return response("No items found", [], True, 200)
+            return response("No items found", {
+                "items": [],
+                "total_count": total_count if 'total_count' in dir() else 0,
+                "page_number": int(page_number or 1),
+                "page_size": _page_size,
+            }, True, 200)
 
     except Exception as exception:
         frappe.log_error(f"CRITICAL ERROR in get_item_list: {str(exception)}\n{frappe.get_traceback()}", "Get Item List Critical Error")
