@@ -5536,14 +5536,14 @@ def get_price_list_items(price_list=None, item_code=None, item_name=None, name=N
 
         where_clause = " AND ".join(conditions)
 
-        # Get latest Item Price per item_code+uom (most recent valid_from)
+        # ── Deduplicate by item_code (one row per item) ──
+        # When an item has multiple Item Price rows (one per UOM), pick the row that
+        # matches the item's default stock_uom; fallback to most recent valid_from.
+        # The uoms[] array still exposes ALL UOM rates per item.
         count_sql = f"""
-            SELECT COUNT(*) FROM (
-                SELECT ip.item_code, ip.uom
-                FROM `tabItem Price` ip
-                WHERE {where_clause}
-                GROUP BY ip.item_code, ip.uom
-            ) as grouped
+            SELECT COUNT(DISTINCT ip.item_code)
+            FROM `tabItem Price` ip
+            WHERE {where_clause}
         """
         total_count = frappe.db.sql(count_sql, values)[0][0]
 
@@ -5552,19 +5552,27 @@ def get_price_list_items(price_list=None, item_code=None, item_name=None, name=N
                    ip.currency, ip.valid_from, ip.valid_upto, ip.batch_no
             FROM `tabItem Price` ip
             INNER JOIN (
-                SELECT item_code, uom, MAX(valid_from) as max_valid_from
-                FROM `tabItem Price`
-                WHERE price_list = %s AND selling = 1
-                GROUP BY item_code, uom
-            ) latest ON ip.item_code = latest.item_code
-                AND COALESCE(ip.uom, '') = COALESCE(latest.uom, '')
-                AND ip.valid_from = latest.max_valid_from
-                AND ip.price_list = %s AND ip.selling = 1
+                SELECT
+                    ip2.item_code,
+                    SUBSTRING_INDEX(
+                        GROUP_CONCAT(ip2.name ORDER BY
+                            CASE WHEN ip2.uom = it2.stock_uom THEN 0 ELSE 1 END ASC,
+                            ip2.valid_from DESC,
+                            ip2.creation DESC
+                            SEPARATOR ','
+                        ),
+                        ',', 1
+                    ) AS best_price_name
+                FROM `tabItem Price` ip2
+                INNER JOIN `tabItem` it2 ON it2.name = ip2.item_code
+                WHERE ip2.price_list = %s AND ip2.selling = 1 AND it2.disabled = 0
+                GROUP BY ip2.item_code
+            ) best ON best.best_price_name = ip.name
             WHERE {where_clause}
             ORDER BY ip.item_code ASC
             LIMIT %s OFFSET %s
         """
-        items = frappe.db.sql(items_sql, [price_list, price_list] + values + [_page_size, _offset], as_dict=True)
+        items = frappe.db.sql(items_sql, [price_list] + values + [_page_size, _offset], as_dict=True)
 
         # Enrich each item with enhanced details
         for item in items:
