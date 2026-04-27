@@ -3047,9 +3047,41 @@ def submit_sales_invoice(params):
         finally:
             Document.check_permission = _orig_check_perm
 
+        # Auto-create Delivery Note if Basket4Me Setting is enabled
+        auto_dn_name = None
+        try:
+            vs = get_basket4me_settings()
+            auto_dn = bool(getattr(vs, "auto_create_delivery_note", 0))
+            ignore_dn = bool(getattr(vs, "ignore_create_delivery_note", 0))
+            should_auto_create = (
+                auto_dn
+                and not ignore_dn
+                and not sales_invoice.is_return
+                and not (sales_invoice.update_stock or 0)
+            )
+            if should_auto_create:
+                from erpnext.accounts.doctype.sales_invoice.sales_invoice import make_delivery_note
+                dn = make_delivery_note(sales_invoice.name)
+                # Sanitize DN before insert
+                dn.flags.ignore_permissions = True
+                Document.check_permission = _patched_check_perm
+                try:
+                    dn.insert(ignore_permissions=True)
+                    dn.submit()
+                finally:
+                    Document.check_permission = _orig_check_perm
+                auto_dn_name = dn.name
+        except Exception as auto_dn_exc:
+            # Do not roll back the SI submit on DN failure — log and continue.
+            frappe.log_error(
+                title="Auto Create Delivery Note Error",
+                message=f"SI {sales_invoice.name}: {str(auto_dn_exc)}\n{frappe.get_traceback()}",
+            )
+
         return response(f"Sales Invoice '{name}' submitted successfully", {
             "sales_invoice": name,
-            "status": sales_invoice.status
+            "status": sales_invoice.status,
+            "auto_delivery_note": auto_dn_name,
         }, True, 200)
 
     except frappe.DoesNotExistError:
@@ -8821,6 +8853,12 @@ def create_delivery_note(params):
         sales_person = frappe.db.get_value("Sales Person", {"custom_user": frappe.session.user}, "name")
         customer = params.get("customer")
         settings = get_basket4me_settings()
+        # Block manual DN creation when auto_create_delivery_note is enabled
+        if getattr(settings, "auto_create_delivery_note", 0):
+            return response(
+                "Manual Delivery Note creation is disabled. Delivery Notes are auto-created on Sales Invoice submission (Basket4Me Settings > Auto Create Delivery Note).",
+                {}, False, 400,
+            )
         sales_person_details = None
         for detail in settings.sales_person_details:
             if detail.sales_person == sales_person:
@@ -9422,6 +9460,12 @@ def create_dn_from_so(params):
 
         sales_person = frappe.db.get_value("Sales Person", {"custom_user": frappe.session.user}, "name")
         settings = get_basket4me_settings()
+        # Block manual DN creation when auto_create_delivery_note is enabled
+        if getattr(settings, "auto_create_delivery_note", 0):
+            return response(
+                "Manual Delivery Note creation is disabled. Delivery Notes are auto-created on Sales Invoice submission (Basket4Me Settings > Auto Create Delivery Note).",
+                {}, False, 400,
+            )
         sp_detail = None
         for d in settings.sales_person_details:
             if d.sales_person == sales_person:

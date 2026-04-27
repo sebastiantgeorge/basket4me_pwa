@@ -11,6 +11,7 @@
   "default_target_warehouse",
   "mode_of_payment_details",
   "ignore_create_delivery_note",
+  "auto_create_delivery_note",
   "validate_stock",
   "edit_rate",
   "show_purchase_rate",
@@ -121,6 +122,14 @@
    "fieldname": "ignore_create_delivery_note",
    "fieldtype": "Check",
    "label": "Ignore Create Delivery Note"
+  },
+  {
+   "default": "0",
+   "depends_on": "eval:!doc.ignore_create_delivery_note",
+   "description": "When enabled, a Delivery Note is auto-created and submitted on Sales Invoice submission. Manual DN creation APIs are blocked. Disable 'DN Required for Sales Invoice' in Selling Settings if you want this flow.",
+   "fieldname": "auto_create_delivery_note",
+   "fieldtype": "Check",
+   "label": "Auto Create Delivery Note"
   },
   {
    "default": "0",
