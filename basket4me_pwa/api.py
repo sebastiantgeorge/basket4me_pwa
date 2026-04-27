@@ -9223,7 +9223,7 @@ def get_delivery_note_list(name=None, customer=None, status=None, search=None,
 
 @frappe.whitelist(methods="GET")
 def get_delivery_note_detail(name=None):
-    """Get single Delivery Note with full details."""
+    """Get single Delivery Note with full details (item shape matches get_sales_order_detail)."""
     try:
         if not name:
             return response("Delivery Note name is required", {}, False, 400)
@@ -9231,6 +9231,100 @@ def get_delivery_note_detail(name=None):
             return response(f"Delivery Note {name} not found", {}, False, 404)
 
         dn = frappe.get_doc("Delivery Note", name)
+
+        # Build items with UOM details and pricing — same shape as get_sales_order_detail
+        items_data = []
+        for i in dn.items:
+            ic = i.item_code
+            stock_uom = i.stock_uom or "Nos"
+
+            # All UOMs (conversion factor only, matches SO detail uoms shape)
+            uom_details = frappe.db.sql("""
+                SELECT uom, conversion_factor
+                FROM `tabUOM Conversion Detail`
+                WHERE parent = %s AND parenttype = 'Item'
+                ORDER BY idx ASC
+            """, ic, as_dict=True)
+            if not uom_details:
+                uom_details = [{"uom": stock_uom, "conversion_factor": 1.0}]
+
+            # MRP — from "MRP" price list at default UOM
+            mrp_result = frappe.db.sql("""
+                SELECT price_list_rate FROM `tabItem Price`
+                WHERE selling = 1 AND item_code = %s AND price_list = 'MRP'
+                AND (uom = %s OR uom IS NULL OR uom = '')
+                ORDER BY valid_from DESC, creation DESC LIMIT 1
+            """, (ic, stock_uom), as_dict=True)
+            mrp = mrp_result[0]["price_list_rate"] if mrp_result else 0.0
+
+            # Standard Selling Price at default UOM
+            std_result = frappe.db.sql("""
+                SELECT price_list_rate FROM `tabItem Price`
+                WHERE selling = 1 AND item_code = %s AND price_list = 'Standard Selling'
+                AND (uom = %s OR uom IS NULL OR uom = '')
+                ORDER BY valid_from DESC, creation DESC LIMIT 1
+            """, (ic, stock_uom), as_dict=True)
+            standard_selling_price = std_result[0]["price_list_rate"] if std_result else 0.0
+
+            # Last Customer Rate from SO and SI (whichever is most recent)
+            last_customer_rate = 0.0
+            last_customer_price_list = None
+            last_customer_price_list_rate = 0.0
+            if dn.customer:
+                last_rate = frappe.db.sql("""
+                    SELECT rate, price_list, price_list_rate, txn_date FROM (
+                        SELECT soi.rate, so2.selling_price_list as price_list,
+                               soi.price_list_rate, so2.transaction_date as txn_date, so2.creation
+                        FROM `tabSales Order Item` soi
+                        JOIN `tabSales Order` so2 ON so2.name = soi.parent
+                        WHERE so2.customer = %s AND soi.item_code = %s
+                        AND so2.docstatus != 2
+                        UNION ALL
+                        SELECT sii.rate, si.selling_price_list as price_list,
+                               sii.price_list_rate, si.posting_date as txn_date, si.creation
+                        FROM `tabSales Invoice Item` sii
+                        JOIN `tabSales Invoice` si ON si.name = sii.parent
+                        WHERE si.customer = %s AND sii.item_code = %s
+                        AND si.docstatus = 1 AND si.is_return = 0
+                    ) combined
+                    ORDER BY txn_date DESC, creation DESC LIMIT 1
+                """, (dn.customer, ic, dn.customer, ic), as_dict=True)
+                if last_rate:
+                    last_customer_rate = last_rate[0].get("rate") or 0.0
+                    last_customer_price_list = last_rate[0].get("price_list") or None
+                    last_customer_price_list_rate = last_rate[0].get("price_list_rate") or 0.0
+
+            items_data.append({
+                "name": i.name,
+                "item_code": ic,
+                "item_name": i.item_name,
+                "description": i.description,
+                "qty": i.qty,
+                "uom": i.uom,
+                "stock_uom": stock_uom,
+                "default_uom": stock_uom,
+                "conversion_factor": i.conversion_factor,
+                "rate": i.rate,
+                "price_list_rate": i.price_list_rate,
+                "discount_percentage": i.discount_percentage,
+                "discount_amount": i.discount_amount,
+                "amount": i.amount,
+                "warehouse": i.warehouse,
+                "delivery_date": str(i.delivery_date) if getattr(i, "delivery_date", None) else None,
+                "currency": dn.currency,
+                "is_free_item": getattr(i, "is_free_item", 0),
+                "batch_no": getattr(i, "batch_no", None),
+                "uoms": [{"uom": u.get("uom"), "conversion_factor": u.get("conversion_factor", 1.0)} for u in uom_details],
+                "mrp": mrp,
+                "standard_selling_price": standard_selling_price,
+                "last_customer_rate": last_customer_rate,
+                "last_customer_price_list": last_customer_price_list,
+                "last_customer_price_list_rate": last_customer_price_list_rate,
+                # DN-specific
+                "against_sales_order": i.against_sales_order,
+                "so_detail": i.so_detail,
+            })
+
         return response("Delivery Note fetched", {
             "name": dn.name, "customer": dn.customer, "customer_name": dn.customer_name,
             "posting_date": str(dn.posting_date), "docstatus": dn.docstatus,
@@ -9238,16 +9332,7 @@ def get_delivery_note_detail(name=None):
             "selling_price_list": dn.selling_price_list,
             "total": dn.total, "net_total": dn.net_total,
             "grand_total": dn.grand_total, "per_billed": dn.per_billed,
-            "items": [{
-                "name": i.name, "item_code": i.item_code, "item_name": i.item_name,
-                "qty": i.qty, "uom": i.uom, "rate": i.rate,
-                "price_list_rate": i.price_list_rate,
-                "discount_percentage": i.discount_percentage,
-                "discount_amount": i.discount_amount,
-                "amount": i.amount, "warehouse": i.warehouse,
-                "against_sales_order": i.against_sales_order,
-                "so_detail": i.so_detail,
-            } for i in dn.items],
+            "items": items_data,
             "taxes": [{
                 "charge_type": t.charge_type, "account_head": t.account_head,
                 "description": t.description, "rate": t.rate,
