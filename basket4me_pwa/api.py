@@ -8397,9 +8397,15 @@ def get_customer_list_v2(name=None, mobile_no=None, territory=None, route=None,
         if mobile_no:
             filters["mobile_no"] = ["like", f"%{mobile_no}%"]
 
-        route_filter = route or territory
-        if route_filter:
-            filters["territory"] = route_filter
+        # Route filter — prefer Customer.custom_route (Customer Route doctype),
+        # fall back to territory if explicitly passed.
+        if route:
+            if frappe.db.has_column("Customer", "custom_route"):
+                filters["custom_route"] = route
+            else:
+                filters["territory"] = route
+        elif territory:
+            filters["territory"] = territory
 
         fields = [
             "name", "customer_name", "mobile_no", "territory",
