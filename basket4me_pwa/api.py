@@ -9209,8 +9209,15 @@ def get_delivery_note_list(name=None, customer=None, status=None, search=None,
             d["created_date"] = str(d.get("creation"))[:10] if d.get("creation") else None
             d["creation"] = str(d.get("creation")) if d.get("creation") else None
 
-            d["items"] = frappe.get_all("Delivery Note Item", filters={"parent": d["name"]},
-                fields=["item_code", "item_name", "qty", "uom", "rate", "amount"])
+            d["items"] = frappe.get_all(
+                "Delivery Note Item",
+                filters={"parent": d["name"]},
+                fields=[
+                    "item_code", "item_name", "qty", "uom", "rate", "amount",
+                    "price_list_rate", "discount_percentage", "discount_amount",
+                    "conversion_factor", "stock_uom",
+                ],
+            )
 
         return response("Delivery Notes fetched", {
             "delivery_notes": dns, "total_count": total_count,
