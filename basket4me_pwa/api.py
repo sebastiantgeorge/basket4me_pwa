@@ -9984,6 +9984,8 @@ def get_pending_sales_order_items(customer=None, as_on_date=None):
             detailed_item = {
                 "sales_order": row["sales_order"],
                 "row_name": row["row_name"],
+                "name": row["row_name"],          # Sales Order Item child row UUID
+                "so_detail": row["row_name"],     # Pass this as so_detail when creating SI item
                 "item_code": row["item_code"],
                 "item_name": row["item_name"],
                 "description": row["description"],
