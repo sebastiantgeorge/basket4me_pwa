@@ -1188,7 +1188,8 @@ def get_invoice_list(name=None, customer=None, status=None, search=None,
                         "item_code", "item_name", "qty", "uom", "stock_uom",
                         "rate", "amount", "price_list_rate",
                         "discount_percentage", "discount_amount",
-                        "conversion_factor"
+                        "conversion_factor",
+                        "sales_order", "so_detail",
                     ]
                 )
 
@@ -1250,6 +1251,8 @@ def get_invoice_detail(name=None):
                 "batch_no": getattr(item, 'batch_no', None) or "",
                 "serial_and_batch_bundle": getattr(item, 'serial_and_batch_bundle', None) or "",
                 "has_batch_no": frappe.db.get_value("Item", item.item_code, "has_batch_no") or 0,
+                "sales_order": getattr(item, 'sales_order', None),
+                "so_detail": getattr(item, 'so_detail', None),
             })
 
         # Customer address
@@ -2647,6 +2650,14 @@ def create_sales_invoice(params):
                 "is_free_item": is_free_item
             }
 
+            # Sales Order linkage (for pending SO consumption tracking)
+            so_ref = item.get("sales_order") or item.get("so_name")
+            so_detail_ref = item.get("so_detail") or item.get("sales_order_item")
+            if so_ref:
+                item_data["sales_order"] = so_ref
+            if so_detail_ref:
+                item_data["so_detail"] = so_detail_ref
+
             # Handle batch selection for pharmaceutical/batch-tracked items
             batch_no = item.get("batch_no")
             if batch_no:
@@ -2880,6 +2891,14 @@ def update_sales_invoice(params):
                     "base_price_list_rate": price_list_rate,
                     "is_free_item": is_free_item
                 }
+
+                # Sales Order linkage (for pending SO consumption tracking)
+                so_ref = item.get("sales_order") or item.get("so_name")
+                so_detail_ref = item.get("so_detail") or item.get("sales_order_item")
+                if so_ref:
+                    item_data["sales_order"] = so_ref
+                if so_detail_ref:
+                    item_data["so_detail"] = so_detail_ref
 
                 # Handle batch selection
                 batch_no = item.get("batch_no")
@@ -8226,14 +8245,21 @@ def get_dashboard_summary(period="daily", from_date=None, to_date=None):
         """
         coll_row = frappe.db.sql(coll_sql, (start, end, sales_person), as_dict=True)[0]
 
-        # Visited customers (using Activity Log or custom tracking)
+        # Visited customers — use Comment-based visit log (matches mark_customer_visit / get_customer_visits)
         visited_customers = 0
-        if frappe.db.exists("DocType", "Customer Visit"):
-            visited_customers = frappe.db.count("Customer Visit", {
-                "sales_person": sales_person,
-                "visit_date": ["between", [start, end]],
-                "docstatus": ["!=", 2]
-            })
+        try:
+            row = frappe.db.sql("""
+                SELECT COUNT(DISTINCT reference_name) AS cnt
+                FROM `tabComment`
+                WHERE comment_type = 'Info'
+                  AND reference_doctype = 'Customer'
+                  AND comment_email = %s
+                  AND content LIKE '%%customer_visit%%'
+                  AND DATE(creation) BETWEEN %s AND %s
+            """, (frappe.session.user, start, end))
+            visited_customers = int(row[0][0]) if row and row[0] and row[0][0] else 0
+        except Exception:
+            visited_customers = 0
 
         return response(
             "Dashboard summary fetched",
@@ -9936,7 +9962,7 @@ def get_pending_sales_order_items(customer=None, as_on_date=None):
             FROM `tabSales Order Item` soi
             INNER JOIN `tabSales Order` so ON so.name = soi.parent
             WHERE soi.parent IN %(so_names)s
-              AND (flt(soi.qty) - flt(COALESCE(soi.delivered_qty, 0))) > 0.001
+              AND (COALESCE(soi.qty, 0) - COALESCE(soi.delivered_qty, 0)) > 0.001
         """, {"so_names": tuple(so_names)}, as_dict=True)
 
         # Build detailed pending items
