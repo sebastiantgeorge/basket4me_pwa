@@ -9888,7 +9888,7 @@ def get_transaction_history(item_code=None, customer=None, doctype=None,
 
 
 @frappe.whitelist(methods="GET")
-def get_pending_sales_order_items(customer=None, as_on_date=None):
+def get_pending_sales_order_items(customer=None, as_on_date=None, search=None):
     """
     Get pending sales order items for a customer (for van sale app).
 
@@ -9898,12 +9898,14 @@ def get_pending_sales_order_items(customer=None, as_on_date=None):
     Query params:
         customer: Customer name (required)
         as_on_date: Filter SOs with transaction_date <= this date (default: today)
+        search: Match against item_name, item_code, or sales_order name (LIKE)
     """
     try:
         if not customer:
             return response("customer is required", {}, False, 400)
 
         as_on_date = as_on_date or nowdate()
+        search_term = (search or "").strip()
 
         # Get submitted, open SOs
         sales_orders = frappe.get_all(
@@ -9929,15 +9931,17 @@ def get_pending_sales_order_items(customer=None, as_on_date=None):
                 "customer": customer,
                 "as_on_date": as_on_date,
                 "pending_orders": [],
+                "pending_items": [],
                 "items_summary": [],
                 "total_pending_amount": 0,
                 "total_pending_qty": 0,
+                "sales_order_count": 0,
             }, True, 200)
 
         so_names = [so["name"] for so in sales_orders]
 
         # Get pending items (qty not fully delivered AND not fully billed)
-        item_rows = frappe.db.sql("""
+        sql = """
             SELECT
                 soi.parent as sales_order,
                 soi.name as row_name,
@@ -9963,7 +9967,17 @@ def get_pending_sales_order_items(customer=None, as_on_date=None):
             INNER JOIN `tabSales Order` so ON so.name = soi.parent
             WHERE soi.parent IN %(so_names)s
               AND (COALESCE(soi.qty, 0) - COALESCE(soi.delivered_qty, 0)) > 0.001
-        """, {"so_names": tuple(so_names)}, as_dict=True)
+        """
+        params = {"so_names": tuple(so_names)}
+        if search_term:
+            sql += """
+              AND (soi.item_name LIKE %(search)s
+                   OR soi.item_code LIKE %(search)s
+                   OR soi.parent LIKE %(search)s)
+            """
+            params["search"] = f"%{search_term}%"
+
+        item_rows = frappe.db.sql(sql, params, as_dict=True)
 
         # Build detailed pending items
         detailed_items = []
@@ -9981,16 +9995,163 @@ def get_pending_sales_order_items(customer=None, as_on_date=None):
 
             pending_amount = pending_qty * flt(row["rate"])
 
+            ic = row["item_code"]
+            stock_uom = row["stock_uom"] or frappe.db.get_value("Item", ic, "stock_uom") or "Nos"
+            so_price_list = row["selling_price_list"]
+
+            # All UOMs with conversion_factor + rate from the SO's price list
+            uoms_list = []
+            try:
+                ud_rows = frappe.db.sql(
+                    """
+                    SELECT uom, conversion_factor
+                    FROM `tabUOM Conversion Detail`
+                    WHERE parent = %s AND parenttype = 'Item'
+                    ORDER BY idx ASC
+                    """,
+                    ic, as_dict=True,
+                ) or [{"uom": stock_uom, "conversion_factor": 1.0}]
+                for ud in ud_rows:
+                    u_name = ud.get("uom")
+                    cf = ud.get("conversion_factor", 1.0)
+                    rate_row = frappe.db.sql(
+                        """
+                        SELECT price_list_rate FROM `tabItem Price`
+                        WHERE selling = 1 AND item_code = %s AND price_list = %s
+                        AND (uom = %s OR uom IS NULL OR uom = '')
+                        ORDER BY CASE WHEN uom = %s THEN 0 ELSE 1 END,
+                                 valid_from DESC, creation DESC
+                        LIMIT 1
+                        """,
+                        (ic, so_price_list, u_name, u_name), as_dict=True,
+                    ) if so_price_list else []
+                    uoms_list.append({
+                        "uom": u_name,
+                        "conversion_factor": cf,
+                        "rate": rate_row[0]["price_list_rate"] if rate_row else 0.0,
+                    })
+            except Exception:
+                uoms_list = [{"uom": stock_uom, "conversion_factor": 1.0, "rate": 0.0}]
+
+            # Latest Item Price record at default UOM (for currency, valid_from, etc.)
+            currency = None
+            valid_from = None
+            valid_upto = None
+            batch_no_ip = None
+            try:
+                ip_row = frappe.db.sql(
+                    """
+                    SELECT currency, valid_from, valid_upto, batch_no
+                    FROM `tabItem Price`
+                    WHERE selling = 1 AND item_code = %s AND price_list = %s
+                    AND (uom = %s OR uom IS NULL OR uom = '')
+                    ORDER BY CASE WHEN uom = %s THEN 0 ELSE 1 END,
+                             valid_from DESC, creation DESC
+                    LIMIT 1
+                    """,
+                    (ic, so_price_list, stock_uom, stock_uom), as_dict=True,
+                ) if so_price_list else []
+                if ip_row:
+                    r = ip_row[0]
+                    currency = r.get("currency")
+                    valid_from = str(r.get("valid_from")) if r.get("valid_from") else None
+                    valid_upto = str(r.get("valid_upto")) if r.get("valid_upto") else None
+                    batch_no_ip = r.get("batch_no")
+            except Exception:
+                pass
+
+            # MRP (from "MRP" price list at default UOM)
+            mrp_val = 0.0
+            try:
+                mrp_r = frappe.db.sql(
+                    """
+                    SELECT price_list_rate FROM `tabItem Price`
+                    WHERE selling = 1 AND item_code = %s AND price_list = 'MRP'
+                    AND (uom = %s OR uom IS NULL OR uom = '')
+                    ORDER BY valid_from DESC, creation DESC LIMIT 1
+                    """,
+                    (ic, stock_uom), as_dict=True,
+                )
+                mrp_val = mrp_r[0]["price_list_rate"] if mrp_r else 0.0
+            except Exception:
+                pass
+
+            # Standard Selling Price (at default UOM)
+            std_val = 0.0
+            try:
+                std_r = frappe.db.sql(
+                    """
+                    SELECT price_list_rate FROM `tabItem Price`
+                    WHERE selling = 1 AND item_code = %s AND price_list = 'Standard Selling'
+                    AND (uom = %s OR uom IS NULL OR uom = '')
+                    ORDER BY valid_from DESC, creation DESC LIMIT 1
+                    """,
+                    (ic, stock_uom), as_dict=True,
+                )
+                std_val = std_r[0]["price_list_rate"] if std_r else 0.0
+            except Exception:
+                pass
+
+            # Last Customer Rate (most recent SO/SI rate for this customer+item)
+            last_cust_rate = 0.0
+            try:
+                lr = frappe.db.sql(
+                    """
+                    SELECT rate FROM (
+                        SELECT soi.rate, so2.transaction_date AS txn_date, so2.creation
+                        FROM `tabSales Order Item` soi
+                        JOIN `tabSales Order` so2 ON so2.name = soi.parent
+                        WHERE so2.customer = %s AND soi.item_code = %s AND so2.docstatus != 2
+                        UNION ALL
+                        SELECT sii.rate, si.posting_date AS txn_date, si.creation
+                        FROM `tabSales Invoice Item` sii
+                        JOIN `tabSales Invoice` si ON si.name = sii.parent
+                        WHERE si.customer = %s AND sii.item_code = %s
+                          AND si.docstatus = 1 AND si.is_return = 0
+                    ) combined
+                    ORDER BY txn_date DESC, creation DESC LIMIT 1
+                    """,
+                    (customer, ic, customer, ic), as_dict=True,
+                )
+                last_cust_rate = (lr[0].get("rate") or 0.0) if lr else 0.0
+            except Exception:
+                pass
+
+            # Available stock qty from salesperson's warehouse, fallback to total
+            avail_qty = 0.0
+            try:
+                wh = row["warehouse"]
+                if not wh:
+                    sp = frappe.db.get_value("Sales Person", {"custom_user": frappe.session.user}, "name")
+                    settings = get_basket4me_settings()
+                    if sp and settings:
+                        for d in settings.sales_person_details:
+                            if d.sales_person == sp:
+                                wh = d.warehouse
+                                break
+                if wh:
+                    avail_qty = flt(frappe.db.get_value("Bin",
+                        {"item_code": ic, "warehouse": wh}, "actual_qty") or 0)
+                else:
+                    tq = frappe.db.sql(
+                        "SELECT COALESCE(SUM(actual_qty), 0) FROM `tabBin` WHERE item_code = %s",
+                        ic,
+                    )
+                    avail_qty = flt(tq[0][0]) if tq else 0.0
+            except Exception:
+                pass
+
             detailed_item = {
                 "sales_order": row["sales_order"],
                 "row_name": row["row_name"],
                 "name": row["row_name"],          # Sales Order Item child row UUID
                 "so_detail": row["row_name"],     # Pass this as so_detail when creating SI item
-                "item_code": row["item_code"],
+                "item_code": ic,
                 "item_name": row["item_name"],
                 "description": row["description"],
                 "uom": row["uom"],
-                "stock_uom": row["stock_uom"],
+                "stock_uom": stock_uom,
+                "default_uom": stock_uom,
                 "conversion_factor": row["conversion_factor"],
                 "ordered_qty": ordered,
                 "delivered_qty": delivered,
@@ -10004,7 +10165,17 @@ def get_pending_sales_order_items(customer=None, as_on_date=None):
                 "warehouse": row["warehouse"],
                 "transaction_date": str(row["transaction_date"]) if row["transaction_date"] else None,
                 "delivery_date": str(row["delivery_date"]) if row["delivery_date"] else None,
-                "selling_price_list": row["selling_price_list"],
+                "selling_price_list": so_price_list,
+                # ── Fields aligned with get_price_list_items ──
+                "currency": currency,
+                "valid_from": valid_from,
+                "valid_upto": valid_upto,
+                "batch_no": batch_no_ip,
+                "uoms": uoms_list,
+                "mrp": mrp_val,
+                "standard_selling_price": std_val,
+                "last_customer_rate": last_cust_rate,
+                "available_qty": avail_qty,
             }
             detailed_items.append(detailed_item)
 
