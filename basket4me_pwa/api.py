@@ -1181,17 +1181,23 @@ def get_invoice_list(name=None, customer=None, status=None, search=None,
                 inv["created_by"] = frappe.db.get_value("User", owner, "full_name") or owner if owner else None
 
                 # Items array
+                _si_item_fields = [
+                    "item_code", "item_name", "qty", "uom", "stock_uom",
+                    "rate", "amount", "price_list_rate",
+                    "discount_percentage", "discount_amount",
+                    "conversion_factor",
+                    "sales_order", "so_detail",
+                ]
+                if frappe.db.has_column("Sales Invoice Item", "custom_ordered_qty"):
+                    _si_item_fields.append("custom_ordered_qty")
                 inv["items"] = frappe.get_all(
                     "Sales Invoice Item",
                     filters={"parent": inv["name"]},
-                    fields=[
-                        "item_code", "item_name", "qty", "uom", "stock_uom",
-                        "rate", "amount", "price_list_rate",
-                        "discount_percentage", "discount_amount",
-                        "conversion_factor",
-                        "sales_order", "so_detail",
-                    ]
+                    fields=_si_item_fields,
                 )
+                # Expose custom_ordered_qty also as 'ordered_qty' for convenience
+                for it in inv["items"]:
+                    it["ordered_qty"] = it.get("custom_ordered_qty")
 
         return response("Invoice List", {
             "invoices": invoice_list or [],
@@ -1253,6 +1259,8 @@ def get_invoice_detail(name=None):
                 "has_batch_no": frappe.db.get_value("Item", item.item_code, "has_batch_no") or 0,
                 "sales_order": getattr(item, 'sales_order', None),
                 "so_detail": getattr(item, 'so_detail', None),
+                "ordered_qty": getattr(item, 'custom_ordered_qty', None),
+                "custom_ordered_qty": getattr(item, 'custom_ordered_qty', None),
             })
 
         # Customer address
@@ -2657,6 +2665,12 @@ def create_sales_invoice(params):
                 item_data["sales_order"] = so_ref
             if so_detail_ref:
                 item_data["so_detail"] = so_detail_ref
+            # Ordered Qty from SO line (validation reference). Custom field auto-fetches
+            # from so_detail.qty, but accept explicit override here too.
+            ordered_qty_ref = item.get("ordered_qty") or item.get("custom_ordered_qty")
+            if ordered_qty_ref is not None and ordered_qty_ref != "":
+                if frappe.db.has_column("Sales Invoice Item", "custom_ordered_qty"):
+                    item_data["custom_ordered_qty"] = flt(ordered_qty_ref)
 
             # Handle batch selection for pharmaceutical/batch-tracked items
             batch_no = item.get("batch_no")
@@ -2899,6 +2913,11 @@ def update_sales_invoice(params):
                     item_data["sales_order"] = so_ref
                 if so_detail_ref:
                     item_data["so_detail"] = so_detail_ref
+                # Ordered Qty from SO line (validation reference)
+                ordered_qty_ref = item.get("ordered_qty") or item.get("custom_ordered_qty")
+                if ordered_qty_ref is not None and ordered_qty_ref != "":
+                    if frappe.db.has_column("Sales Invoice Item", "custom_ordered_qty"):
+                        item_data["custom_ordered_qty"] = flt(ordered_qty_ref)
 
                 # Handle batch selection
                 batch_no = item.get("batch_no")
