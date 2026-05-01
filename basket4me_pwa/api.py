@@ -1235,15 +1235,77 @@ def get_invoice_detail(name=None):
                 fields=["uom", "conversion_factor"],
             )
 
+            ic = item.item_code
+            stock_uom = item.stock_uom or "Nos"
+
+            # MRP from "MRP" price list at default UOM
+            mrp_val = 0.0
+            try:
+                mrp_r = frappe.db.sql(
+                    """
+                    SELECT price_list_rate FROM `tabItem Price`
+                    WHERE selling = 1 AND item_code = %s AND price_list = 'MRP'
+                    AND (uom = %s OR uom IS NULL OR uom = '')
+                    ORDER BY valid_from DESC, creation DESC LIMIT 1
+                    """,
+                    (ic, stock_uom), as_dict=True,
+                )
+                mrp_val = mrp_r[0]["price_list_rate"] if mrp_r else 0.0
+            except Exception:
+                pass
+
+            # Standard Selling Price at default UOM
+            std_val = 0.0
+            try:
+                std_r = frappe.db.sql(
+                    """
+                    SELECT price_list_rate FROM `tabItem Price`
+                    WHERE selling = 1 AND item_code = %s AND price_list = 'Standard Selling'
+                    AND (uom = %s OR uom IS NULL OR uom = '')
+                    ORDER BY valid_from DESC, creation DESC LIMIT 1
+                    """,
+                    (ic, stock_uom), as_dict=True,
+                )
+                std_val = std_r[0]["price_list_rate"] if std_r else 0.0
+            except Exception:
+                pass
+
+            # Last Customer Rate (most recent SO/SI rate for this customer+item)
+            last_cust_rate = 0.0
+            if doc.customer:
+                try:
+                    lr = frappe.db.sql(
+                        """
+                        SELECT rate FROM (
+                            SELECT soi.rate, so2.transaction_date AS txn_date, so2.creation
+                            FROM `tabSales Order Item` soi
+                            JOIN `tabSales Order` so2 ON so2.name = soi.parent
+                            WHERE so2.customer = %s AND soi.item_code = %s AND so2.docstatus != 2
+                            UNION ALL
+                            SELECT sii.rate, si.posting_date AS txn_date, si.creation
+                            FROM `tabSales Invoice Item` sii
+                            JOIN `tabSales Invoice` si ON si.name = sii.parent
+                            WHERE si.customer = %s AND sii.item_code = %s
+                              AND si.docstatus = 1 AND si.is_return = 0
+                              AND si.name != %s
+                        ) combined
+                        ORDER BY txn_date DESC, creation DESC LIMIT 1
+                        """,
+                        (doc.customer, ic, doc.customer, ic, doc.name), as_dict=True,
+                    )
+                    last_cust_rate = (lr[0].get("rate") or 0.0) if lr else 0.0
+                except Exception:
+                    pass
+
             items.append({
-                "item_code": item.item_code,
+                "item_code": ic,
                 "item_name": item.item_name,
                 "description": item.description,
                 "qty": item.qty,
                 "uom": item.uom,
                 "stock_qty": item.stock_qty,
-                "stock_uom": item.stock_uom,
-                "default_uom": item.stock_uom,
+                "stock_uom": stock_uom,
+                "default_uom": stock_uom,
                 "conversion_factor": item.conversion_factor,
                 "rate": item.rate,
                 "price_list_rate": item.price_list_rate,
@@ -1256,11 +1318,14 @@ def get_invoice_detail(name=None):
                 "uoms": [{"uom": u.uom, "conversion_factor": u.conversion_factor} for u in available_uoms],
                 "batch_no": getattr(item, 'batch_no', None) or "",
                 "serial_and_batch_bundle": getattr(item, 'serial_and_batch_bundle', None) or "",
-                "has_batch_no": frappe.db.get_value("Item", item.item_code, "has_batch_no") or 0,
+                "has_batch_no": frappe.db.get_value("Item", ic, "has_batch_no") or 0,
                 "sales_order": getattr(item, 'sales_order', None),
                 "so_detail": getattr(item, 'so_detail', None),
                 "ordered_qty": getattr(item, 'custom_ordered_qty', None),
                 "custom_ordered_qty": getattr(item, 'custom_ordered_qty', None),
+                "mrp": mrp_val,
+                "standard_selling_price": std_val,
+                "last_customer_rate": last_cust_rate,
             })
 
         # Customer address
