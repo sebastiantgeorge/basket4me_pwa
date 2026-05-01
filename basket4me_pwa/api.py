@@ -1326,6 +1326,7 @@ def get_invoice_detail(name=None):
                 "mrp": mrp_val,
                 "standard_selling_price": std_val,
                 "last_customer_rate": last_cust_rate,
+                "currency": doc.currency,
             })
 
         # Customer address
