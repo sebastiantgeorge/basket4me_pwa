@@ -111,6 +111,31 @@ def enforce_free_item_rates(sales_invoice):
     
     return changes_made
 
+def enforce_free_item_rates_sales_order(sales_order):
+    """
+    Force rate=0 / amount=0 for free items on a Sales Order.
+    Mirror of enforce_free_item_rates(sales_invoice).
+    """
+    changes_made = False
+    for so_item in sales_order.items:
+        if hasattr(so_item, 'is_free_item') and so_item.is_free_item:
+            for field in ('rate', 'price_list_rate', 'base_rate', 'base_price_list_rate', 'stock_uom_rate'):
+                if hasattr(so_item, field) and getattr(so_item, field, 0) != 0:
+                    setattr(so_item, field, 0)
+                    changes_made = True
+            for field in ('amount', 'net_amount', 'base_amount', 'base_net_amount', 'stock_uom_amount'):
+                if hasattr(so_item, field) and getattr(so_item, field, 0) != 0:
+                    setattr(so_item, field, 0)
+                    changes_made = True
+            if hasattr(so_item, 'discount_amount') and so_item.discount_amount > 0:
+                so_item.discount_amount = 0
+                so_item.discount_percentage = 0
+                changes_made = True
+    if changes_made:
+        sales_order.run_method("calculate_taxes_and_totals")
+    return changes_made
+
+
 def enforce_free_item_rates_delivery_note(delivery_note):
     """
     Utility function to enforce that free items in delivery note always have rate = 0
@@ -5650,44 +5675,58 @@ def get_price_list_items(price_list=None, item_code=None, item_name=None, name=N
                 ["item_name", "like", f"%{search}%"],
             ]
 
-        # Build SQL to get only the latest Item Price per item_code+uom
-        conditions = ["ip.price_list = %s", "ip.selling = 1"]
-        values = [price_list]
+        # ── Item-driven query: return ALL active items ──
+        # Items without a price in the selected price list still appear
+        # with price_list_rate = 0 (LEFT JOIN against tabItem Price).
+        item_conditions = ["it.disabled = 0"]
+        item_values = []
 
         code_filter = name or item_code
         if code_filter:
-            conditions.append("ip.item_code LIKE %s")
-            values.append(f"%{code_filter}%")
+            item_conditions.append("it.name LIKE %s")
+            item_values.append(f"%{code_filter}%")
 
         if item_name:
-            conditions.append("ip.item_name LIKE %s")
-            values.append(f"%{item_name}%")
+            item_conditions.append("it.item_name LIKE %s")
+            item_values.append(f"%{item_name}%")
 
         if search:
-            conditions.append("(ip.item_code LIKE %s OR ip.item_name LIKE %s)")
-            values.extend([f"%{search}%", f"%{search}%"])
+            item_conditions.append("(it.name LIKE %s OR it.item_name LIKE %s)")
+            item_values.extend([f"%{search}%", f"%{search}%"])
 
-        # Exclude disabled items
-        conditions.append("NOT EXISTS (SELECT 1 FROM `tabItem` it WHERE it.name = ip.item_code AND it.disabled = 1)")
+        # If a custom mobile-app flag exists on Item, restrict to allowed items only
+        if frappe.db.has_column("Item", "custom_allow_mobile_app"):
+            item_conditions.append("(it.custom_allow_mobile_app = 1 OR it.custom_allow_mobile_app IS NULL)")
 
-        where_clause = " AND ".join(conditions)
+        item_where = " AND ".join(item_conditions)
 
-        # ── Deduplicate by item_code (one row per item) ──
-        # When an item has multiple Item Price rows (one per UOM), pick the row that
-        # matches the item's default stock_uom; fallback to most recent valid_from.
-        # The uoms[] array still exposes ALL UOM rates per item.
+        # Total count = unique items matching the filter
         count_sql = f"""
-            SELECT COUNT(DISTINCT ip.item_code)
-            FROM `tabItem Price` ip
-            WHERE {where_clause}
+            SELECT COUNT(*)
+            FROM `tabItem` it
+            WHERE {item_where}
         """
-        total_count = frappe.db.sql(count_sql, values)[0][0]
+        total_count = frappe.db.sql(count_sql, item_values)[0][0]
 
+        # Pick the best matching Item Price row per item:
+        # - prefer rows where uom = item's stock_uom
+        # - else most recent valid_from
+        # If no price exists, the LEFT JOIN yields NULL → price_list_rate=0 below.
         items_sql = f"""
-            SELECT ip.name, ip.item_code, ip.item_name, ip.uom, ip.price_list_rate,
-                   ip.currency, ip.valid_from, ip.valid_upto, ip.batch_no
-            FROM `tabItem Price` ip
-            INNER JOIN (
+            SELECT
+                it.name AS item_code_pk,
+                it.name AS item_code,
+                it.item_name,
+                it.stock_uom,
+                ip.name AS price_record_name,
+                ip.uom AS price_uom,
+                ip.price_list_rate,
+                ip.currency,
+                ip.valid_from,
+                ip.valid_upto,
+                ip.batch_no
+            FROM `tabItem` it
+            LEFT JOIN (
                 SELECT
                     ip2.item_code,
                     SUBSTRING_INDEX(
@@ -5703,12 +5742,28 @@ def get_price_list_items(price_list=None, item_code=None, item_name=None, name=N
                 INNER JOIN `tabItem` it2 ON it2.name = ip2.item_code
                 WHERE ip2.price_list = %s AND ip2.selling = 1 AND it2.disabled = 0
                 GROUP BY ip2.item_code
-            ) best ON best.best_price_name = ip.name
-            WHERE {where_clause}
-            ORDER BY ip.item_code ASC
+            ) best ON best.item_code = it.name
+            LEFT JOIN `tabItem Price` ip ON ip.name = best.best_price_name
+            WHERE {item_where}
+            ORDER BY it.name ASC
             LIMIT %s OFFSET %s
         """
-        items = frappe.db.sql(items_sql, [price_list] + values + [_page_size, _offset], as_dict=True)
+        rows = frappe.db.sql(items_sql, [price_list] + item_values + [_page_size, _offset], as_dict=True)
+
+        # Normalize: ensure name/uom/price_list_rate are present even when no price record exists
+        items = []
+        for r in rows:
+            items.append({
+                "name": r.get("price_record_name"),
+                "item_code": r.get("item_code"),
+                "item_name": r.get("item_name"),
+                "uom": r.get("price_uom") or r.get("stock_uom") or "Nos",
+                "price_list_rate": flt(r.get("price_list_rate") or 0),
+                "currency": r.get("currency"),
+                "valid_from": str(r.get("valid_from")) if r.get("valid_from") else None,
+                "valid_upto": str(r.get("valid_upto")) if r.get("valid_upto") else None,
+                "batch_no": r.get("batch_no"),
+            })
 
         # Enrich each item with enhanced details
         for item in items:
@@ -7427,6 +7482,14 @@ def create_sales_order(params):
 
             discounted_rate = rate - discount_amount
 
+            # Free items: zero out all rate/amount fields up-front so ERPNext's
+            # calculate_taxes_and_totals doesn't recompute amount from price_list_rate.
+            if is_free_item:
+                discounted_rate = 0
+                price_list_rate = 0
+                discount_amount = 0
+                discount_percentage = 0
+
             item_data = {
                 "item_code": item_code,
                 "qty": qty,
@@ -7441,6 +7504,13 @@ def create_sales_order(params):
                 "delivery_date": delivery_date,
                 "is_free_item": is_free_item
             }
+            if is_free_item:
+                item_data["amount"] = 0
+                item_data["net_amount"] = 0
+                item_data["base_rate"] = 0
+                item_data["base_amount"] = 0
+                item_data["base_net_amount"] = 0
+                item_data["base_price_list_rate"] = 0
 
             batch_no = item.get("batch_no")
             if batch_no:
@@ -7480,6 +7550,8 @@ def create_sales_order(params):
             so.discount_amount = additional_discount_amount
 
         so.run_method("calculate_taxes_and_totals")
+        # Re-zero free items in case ERPNext re-derived their rates.
+        enforce_free_item_rates_sales_order(so)
 
         po_no = params.get("po_no")
         remarks_text = params.get("remarks")
@@ -7910,7 +7982,8 @@ def get_sales_order_list(name=None, customer=None, status=None, search=None, fro
                 fields=[
                     "item_code", "item_name", "qty", "uom", "rate", "amount",
                     "price_list_rate", "discount_percentage", "discount_amount",
-                    "conversion_factor", "stock_uom"
+                    "conversion_factor", "stock_uom",
+                    "is_free_item",
                 ]
             )
 
