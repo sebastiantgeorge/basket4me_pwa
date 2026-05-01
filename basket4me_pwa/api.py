@@ -2732,6 +2732,14 @@ def create_sales_invoice(params):
             # Calculate the discounted rate
             discounted_rate = rate - discount_amount
 
+            # Free items: zero out all rate/amount fields up-front so ERPNext's
+            # calculate_taxes_and_totals doesn't recompute amount from price_list_rate.
+            if is_free_item:
+                discounted_rate = 0
+                price_list_rate = 0
+                discount_amount = 0
+                discount_percentage = 0
+
             item_data = {
                 "item_code": item_code,
                 "qty": qty,
@@ -2748,6 +2756,11 @@ def create_sales_invoice(params):
                 "base_price_list_rate": price_list_rate,
                 "is_free_item": is_free_item
             }
+            if is_free_item:
+                item_data["amount"] = 0
+                item_data["net_amount"] = 0
+                item_data["base_amount"] = 0
+                item_data["base_net_amount"] = 0
 
             # Sales Order linkage (for pending SO consumption tracking)
             so_ref = item.get("sales_order") or item.get("so_name")
@@ -2980,6 +2993,13 @@ def update_sales_invoice(params):
 
                 discounted_rate = rate - discount_amount
 
+                # Free items: zero rate/amount fields up-front (ERPNext recomputes amount otherwise).
+                if is_free_item:
+                    discounted_rate = 0
+                    price_list_rate = 0
+                    discount_amount = 0
+                    discount_percentage = 0
+
                 item_data = {
                     "item_code": item_code,
                     "qty": qty,
@@ -2996,6 +3016,11 @@ def update_sales_invoice(params):
                     "base_price_list_rate": price_list_rate,
                     "is_free_item": is_free_item
                 }
+                if is_free_item:
+                    item_data["amount"] = 0
+                    item_data["net_amount"] = 0
+                    item_data["base_amount"] = 0
+                    item_data["base_net_amount"] = 0
 
                 # Sales Order linkage (for pending SO consumption tracking)
                 so_ref = item.get("sales_order") or item.get("so_name")
@@ -9113,6 +9138,13 @@ def create_delivery_note(params):
                 discount_amount = 0
             discounted_rate = price_list_rate - discount_amount
 
+            # Free items: zero rate/amount fields up-front (ERPNext recomputes amount otherwise).
+            if is_free_item:
+                discounted_rate = 0
+                price_list_rate = 0
+                discount_amount = 0
+                discount_percentage = 0
+
             item_data = {
                 "item_code": item_code, "qty": qty, "uom": uom,
                 "description": description,
@@ -9121,9 +9153,18 @@ def create_delivery_note(params):
                 "discount_percentage": discount_percentage,
                 "discount_amount": discount_amount,
                 "rate": discounted_rate,
+                "stock_uom_rate": discounted_rate,
                 "price_list_rate": price_list_rate,
+                "base_rate": discounted_rate,
+                "base_price_list_rate": price_list_rate,
                 "is_free_item": is_free_item,
             }
+            if is_free_item:
+                item_data["amount"] = 0
+                item_data["net_amount"] = 0
+                item_data["base_amount"] = 0
+                item_data["base_net_amount"] = 0
+
             # SO linkage if provided
             if item.get("against_sales_order"):
                 item_data["against_sales_order"] = item.get("against_sales_order")
@@ -9151,6 +9192,8 @@ def create_delivery_note(params):
             dn.discount_amount = additional_discount_amount
 
         dn.run_method("calculate_taxes_and_totals")
+        # Re-zero free items in case ERPNext re-derived their rates.
+        enforce_free_item_rates_delivery_note(dn)
 
         if params.get("po_no"):
             dn.po_no = params.get("po_no")
@@ -9257,6 +9300,13 @@ def update_delivery_note(params):
                     discount_amount = 0
                 discounted_rate = price_list_rate - discount_amount
 
+                # Free items: zero rate/amount fields up-front.
+                if is_free_item:
+                    discounted_rate = 0
+                    price_list_rate = 0
+                    discount_amount = 0
+                    discount_percentage = 0
+
                 item_data = {
                     "item_code": item_code, "qty": qty, "uom": uom,
                     "warehouse": sales_person_details.warehouse,
@@ -9264,9 +9314,17 @@ def update_delivery_note(params):
                     "discount_percentage": discount_percentage,
                     "discount_amount": discount_amount,
                     "rate": discounted_rate,
+                    "stock_uom_rate": discounted_rate,
                     "price_list_rate": price_list_rate,
+                    "base_rate": discounted_rate,
+                    "base_price_list_rate": price_list_rate,
                     "is_free_item": is_free_item,
                 }
+                if is_free_item:
+                    item_data["amount"] = 0
+                    item_data["net_amount"] = 0
+                    item_data["base_amount"] = 0
+                    item_data["base_net_amount"] = 0
                 if item.get("against_sales_order"):
                     item_data["against_sales_order"] = item["against_sales_order"]
                 if item.get("so_detail"):
@@ -9284,6 +9342,8 @@ def update_delivery_note(params):
             dn.apply_discount_on = "Net Total"
             dn.discount_amount = additional_discount_amount
         dn.run_method("calculate_taxes_and_totals")
+        # Re-zero free items in case ERPNext re-derived their rates.
+        enforce_free_item_rates_delivery_note(dn)
         dn.save(ignore_permissions=True)
         frappe.db.commit()
 
