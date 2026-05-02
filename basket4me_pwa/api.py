@@ -2701,44 +2701,41 @@ def create_sales_invoice(params):
 
             latest_item_price = item_price[0]["price_list_rate"] if item_price else None
 
-            # price_list_rate is the reference rate from Item Price
+            # price_list_rate is the reference (un-discounted) rate from Item Price
             price_list_rate = flt(latest_item_price) if latest_item_price is not None else flt(provided_rate)
 
-            # Actual rate: use frontend-provided rate; fallback to price list rate
-            if is_free_item:
-                rate = 0
-            elif provided_rate is not None and str(provided_rate).strip() != "":
-                rate = flt(provided_rate)
-            else:
-                rate = price_list_rate
-
-            # Handle both discount_percentage and discount_amount from mobile app
             provided_discount_percentage = flt(item.get("discount_percentage", 0))
             provided_discount_amount = flt(item.get("discount_amount", 0))
 
-            # Calculate discount based on what's provided
-            if provided_discount_percentage and price_list_rate:
-                # If discount percentage is provided, calculate discount amount from it
-                discount_percentage = provided_discount_percentage
-                discount_amount = (price_list_rate * discount_percentage) / 100
-            elif provided_discount_amount and price_list_rate:
-                # If discount amount is provided, calculate discount percentage from it
-                discount_amount = provided_discount_amount
-                discount_percentage = (discount_amount / price_list_rate) * 100
-            else:
-                discount_percentage = 0
-                discount_amount = 0
-
-            # Calculate the discounted rate
-            discounted_rate = rate - discount_amount
-
-            # Free items: zero out all rate/amount fields up-front so ERPNext's
-            # calculate_taxes_and_totals doesn't recompute amount from price_list_rate.
+            # ERPNext stores: rate = post-discount unit rate, discount_amount = price_list_rate - rate
+            # If frontend provides `rate`, treat it as the FINAL post-discount rate (don't double-subtract).
+            # Otherwise, derive rate from price_list_rate and the provided discount.
             if is_free_item:
                 discounted_rate = 0
                 price_list_rate = 0
                 discount_amount = 0
                 discount_percentage = 0
+            elif provided_rate is not None and str(provided_rate).strip() != "":
+                discounted_rate = flt(provided_rate)
+                # Back-derive discount from (price_list_rate - rate)
+                if price_list_rate and discounted_rate < price_list_rate:
+                    discount_amount = price_list_rate - discounted_rate
+                    discount_percentage = (discount_amount / price_list_rate) * 100
+                else:
+                    discount_amount = 0
+                    discount_percentage = 0
+            elif provided_discount_percentage and price_list_rate:
+                discount_percentage = provided_discount_percentage
+                discount_amount = (price_list_rate * discount_percentage) / 100
+                discounted_rate = price_list_rate - discount_amount
+            elif provided_discount_amount and price_list_rate:
+                discount_amount = provided_discount_amount
+                discount_percentage = (discount_amount / price_list_rate) * 100
+                discounted_rate = price_list_rate - discount_amount
+            else:
+                discount_amount = 0
+                discount_percentage = 0
+                discounted_rate = price_list_rate
 
             item_data = {
                 "item_code": item_code,
@@ -2967,38 +2964,38 @@ def update_sales_invoice(params):
 
                 latest_item_price = item_price[0]["price_list_rate"] if item_price else None
 
-                # price_list_rate is the reference rate from Item Price
+                # price_list_rate is the reference (un-discounted) rate from Item Price
                 price_list_rate = flt(latest_item_price) if latest_item_price is not None else flt(provided_rate)
-
-                # Actual rate: use frontend-provided rate; fallback to price list rate
-                if is_free_item:
-                    rate = 0
-                elif provided_rate is not None and str(provided_rate).strip() != "":
-                    rate = flt(provided_rate)
-                else:
-                    rate = price_list_rate
 
                 provided_discount_percentage = flt(item.get("discount_percentage", 0))
                 provided_discount_amount = flt(item.get("discount_amount", 0))
 
-                if provided_discount_percentage and price_list_rate:
-                    discount_percentage = provided_discount_percentage
-                    discount_amount = (price_list_rate * discount_percentage) / 100
-                elif provided_discount_amount and price_list_rate:
-                    discount_amount = provided_discount_amount
-                    discount_percentage = (discount_amount / price_list_rate) * 100
-                else:
-                    discount_percentage = 0
-                    discount_amount = 0
-
-                discounted_rate = rate - discount_amount
-
-                # Free items: zero rate/amount fields up-front (ERPNext recomputes amount otherwise).
+                # If frontend provides `rate`, treat it as the FINAL post-discount rate (don't double-subtract).
                 if is_free_item:
                     discounted_rate = 0
                     price_list_rate = 0
                     discount_amount = 0
                     discount_percentage = 0
+                elif provided_rate is not None and str(provided_rate).strip() != "":
+                    discounted_rate = flt(provided_rate)
+                    if price_list_rate and discounted_rate < price_list_rate:
+                        discount_amount = price_list_rate - discounted_rate
+                        discount_percentage = (discount_amount / price_list_rate) * 100
+                    else:
+                        discount_amount = 0
+                        discount_percentage = 0
+                elif provided_discount_percentage and price_list_rate:
+                    discount_percentage = provided_discount_percentage
+                    discount_amount = (price_list_rate * discount_percentage) / 100
+                    discounted_rate = price_list_rate - discount_amount
+                elif provided_discount_amount and price_list_rate:
+                    discount_amount = provided_discount_amount
+                    discount_percentage = (discount_amount / price_list_rate) * 100
+                    discounted_rate = price_list_rate - discount_amount
+                else:
+                    discount_amount = 0
+                    discount_percentage = 0
+                    discounted_rate = price_list_rate
 
                 item_data = {
                     "item_code": item_code,
@@ -5775,6 +5772,9 @@ def get_price_list_items(price_list=None, item_code=None, item_name=None, name=N
         """
         rows = frappe.db.sql(items_sql, [price_list] + item_values + [_page_size, _offset], as_dict=True)
 
+        # Default currency from the Price List header (used when an item has no Item Price entry).
+        default_pl_currency = frappe.db.get_value("Price List", price_list, "currency")
+
         # Normalize: ensure name/uom/price_list_rate are present even when no price record exists
         items = []
         for r in rows:
@@ -5784,7 +5784,7 @@ def get_price_list_items(price_list=None, item_code=None, item_name=None, name=N
                 "item_name": r.get("item_name"),
                 "uom": r.get("price_uom") or r.get("stock_uom") or "Nos",
                 "price_list_rate": flt(r.get("price_list_rate") or 0),
-                "currency": r.get("currency"),
+                "currency": r.get("currency") or default_pl_currency,
                 "valid_from": str(r.get("valid_from")) if r.get("valid_from") else None,
                 "valid_upto": str(r.get("valid_upto")) if r.get("valid_upto") else None,
                 "batch_no": r.get("batch_no"),
