@@ -1210,7 +1210,7 @@ def get_invoice_list(name=None, customer=None, status=None, search=None,
                     "item_code", "item_name", "qty", "uom", "stock_uom",
                     "rate", "amount", "price_list_rate",
                     "discount_percentage", "discount_amount",
-                    "conversion_factor",
+                    "conversion_factor", "is_free_item",
                     "sales_order", "so_detail",
                 ]
                 if frappe.db.has_column("Sales Invoice Item", "custom_ordered_qty"):
@@ -1964,13 +1964,14 @@ def get_item_list(name=None, item_name=None, customer=None, search=None,
                                 FROM `tabSales Order Item` soi
                                 JOIN `tabSales Order` so2 ON so2.name = soi.parent
                                 WHERE so2.customer = %s AND soi.item_code = %s
-                                AND so2.docstatus != 2
+                                AND so2.docstatus != 2 AND soi.is_free_item = 0
                                 UNION ALL
                                 SELECT sii.rate, si.posting_date as txn_date, si.creation
                                 FROM `tabSales Invoice Item` sii
                                 JOIN `tabSales Invoice` si ON si.name = sii.parent
                                 WHERE si.customer = %s AND sii.item_code = %s
                                 AND si.docstatus = 1 AND si.is_return = 0
+                                AND sii.is_free_item = 0
                             ) combined
                             ORDER BY txn_date DESC, creation DESC LIMIT 1
                         """, (customer, item["name"], customer, item["name"]), as_dict=True)
@@ -5857,13 +5858,14 @@ def get_price_list_items(price_list=None, item_code=None, item_name=None, name=N
                         FROM `tabSales Order Item` soi
                         JOIN `tabSales Order` so2 ON so2.name = soi.parent
                         WHERE so2.customer = %s AND soi.item_code = %s
-                        AND so2.docstatus != 2
+                        AND so2.docstatus != 2 AND soi.is_free_item = 0
                         UNION ALL
                         SELECT sii.rate, si.posting_date as txn_date, si.creation
                         FROM `tabSales Invoice Item` sii
                         JOIN `tabSales Invoice` si ON si.name = sii.parent
                         WHERE si.customer = %s AND sii.item_code = %s
                         AND si.docstatus = 1 AND si.is_return = 0
+                        AND sii.is_free_item = 0
                     ) combined
                     ORDER BY txn_date DESC, creation DESC LIMIT 1
                 """, (customer, ic, customer, ic), as_dict=True)
@@ -8101,7 +8103,7 @@ def get_sales_order_detail(name=None):
                         FROM `tabSales Order Item` soi
                         JOIN `tabSales Order` so2 ON so2.name = soi.parent
                         WHERE so2.customer = %s AND soi.item_code = %s
-                        AND so2.docstatus != 2
+                        AND so2.docstatus != 2 AND soi.is_free_item = 0
                         UNION ALL
                         SELECT sii.rate, si.selling_price_list as price_list,
                                sii.price_list_rate, si.posting_date as txn_date, si.creation
@@ -8109,6 +8111,7 @@ def get_sales_order_detail(name=None):
                         JOIN `tabSales Invoice` si ON si.name = sii.parent
                         WHERE si.customer = %s AND sii.item_code = %s
                         AND si.docstatus = 1 AND si.is_return = 0
+                        AND sii.is_free_item = 0
                     ) combined
                     ORDER BY txn_date DESC, creation DESC LIMIT 1
                 """, (so.customer, ic, so.customer, ic), as_dict=True)
@@ -8294,6 +8297,7 @@ def convert_so_to_si(params):
                     "cost_center": sales_person_details.cost_center,
                     "sales_order": so.name,
                     "so_detail": item.name,
+                    "is_free_item": item.is_free_item,
                 })
 
         # Add payments
@@ -9582,7 +9586,7 @@ def get_delivery_note_detail(name=None):
                         FROM `tabSales Order Item` soi
                         JOIN `tabSales Order` so2 ON so2.name = soi.parent
                         WHERE so2.customer = %s AND soi.item_code = %s
-                        AND so2.docstatus != 2
+                        AND so2.docstatus != 2 AND soi.is_free_item = 0
                         UNION ALL
                         SELECT sii.rate, si.selling_price_list as price_list,
                                sii.price_list_rate, si.posting_date as txn_date, si.creation
@@ -9590,6 +9594,7 @@ def get_delivery_note_detail(name=None):
                         JOIN `tabSales Invoice` si ON si.name = sii.parent
                         WHERE si.customer = %s AND sii.item_code = %s
                         AND si.docstatus = 1 AND si.is_return = 0
+                        AND sii.is_free_item = 0
                     ) combined
                     ORDER BY txn_date DESC, creation DESC LIMIT 1
                 """, (dn.customer, ic, dn.customer, ic), as_dict=True)
@@ -10561,13 +10566,15 @@ def get_price_list_items_bulk(params=None):
                         SELECT soi.rate, so2.transaction_date as txn_date, so2.creation
                         FROM `tabSales Order Item` soi
                         JOIN `tabSales Order` so2 ON so2.name = soi.parent
-                        WHERE so2.customer = %s AND soi.item_code = %s AND so2.docstatus != 2
+                        WHERE so2.customer = %s AND soi.item_code = %s
+                        AND so2.docstatus != 2 AND soi.is_free_item = 0
                         UNION ALL
                         SELECT sii.rate, si.posting_date as txn_date, si.creation
                         FROM `tabSales Invoice Item` sii
                         JOIN `tabSales Invoice` si ON si.name = sii.parent
                         WHERE si.customer = %s AND sii.item_code = %s
                         AND si.docstatus = 1 AND si.is_return = 0
+                        AND sii.is_free_item = 0
                     ) combined
                     ORDER BY txn_date DESC, creation DESC LIMIT 1
                 """, (customer, ic, customer, ic), as_dict=True)
