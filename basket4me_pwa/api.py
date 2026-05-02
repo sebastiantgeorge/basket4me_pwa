@@ -4373,118 +4373,59 @@ def customer_invoice_details(customer=None):
 @frappe.whitelist(methods="GET")
 def get_available_modes_of_payment():
     """
-    Get available modes of payment based on payment_entry_based_on_sales_person setting
-    If enabled: Returns sales person specific mode + universal modes from settings
-    If disabled: Returns all available modes of payment from the system
+    Return all Modes of Payment configured in Basket4Me Settings → Mode Of
+    Payment Details. The configured table is the source of truth — admins
+    add every allowed MOP there.
+
+    If the row has a `company` set, it's filtered by the logged-in user's
+    sales-person company (so sales people in different companies only see
+    their own MOPs).
     """
     try:
         settings = get_basket4me_settings()
-        
-        # Check the new setting
-        payment_based_on_sales_person = getattr(settings, 'payment_entry_based_on_sales_person', True)
-        
-        if payment_based_on_sales_person:
-            # Sales person based logic - use current user's sales person
-            sales_person = frappe.db.get_value("Sales Person", {"custom_user": frappe.session.user}, "name")
-            
-            if not sales_person:
-                return response("No Sales Person linked to the logged-in user", {}, False, 400)
-            
-            # Find sales person details for current user
-            sales_person_details = None
+
+        # Determine sales person + their company (used for per-company MOP filtering).
+        sales_person = frappe.db.get_value("Sales Person", {"custom_user": frappe.session.user}, "name")
+        sp_company = None
+        if sales_person:
             for detail in settings.sales_person_details:
                 if detail.sales_person == sales_person:
-                    sales_person_details = detail
+                    sp_company = detail.company
                     break
-            
-            if not sales_person_details:
-                return response(f"No Basket4Me Settings found for sales person {sales_person}", {}, False, 400)
-            
-            available_modes = []
-            
-            # Add sales person specific mode if found
-            if sales_person_details and sales_person_details.mode_of_payment:
-                mode_doc = frappe.get_doc("Mode of Payment", sales_person_details.mode_of_payment)
-                available_modes.append({
-                    "mode_of_payment": sales_person_details.mode_of_payment,
-                    "type": "sales_person_specific",
-                    "mop_type": mode_doc.type if mode_doc else "Cash",
-                    "sales_person": sales_person,
-                    "enabled": mode_doc.enabled if mode_doc else 1
-                })
 
-            # Add universal modes from Mode Of Payment Details table
-            # Filter by sales person's company (if company is set on the MOP Detail row)
-            sales_person_mode = sales_person_details.mode_of_payment if sales_person_details else None
-            sp_company = sales_person_details.company if sales_person_details else None
-            for mode_detail in settings.mode_of_payment_details:
-                # Skip if MOP Detail has a company set and it doesn't match the sales person's company
-                if sp_company and getattr(mode_detail, 'company', None) and mode_detail.company != sp_company:
-                    continue
-                # Avoid duplicates
-                if mode_detail.mode_of_payment != sales_person_mode:
-                    mode_doc = frappe.get_doc("Mode of Payment", mode_detail.mode_of_payment)
-                    available_modes.append({
-                        "mode_of_payment": mode_detail.mode_of_payment,
-                        "type": "universal",
-                        "mop_type": mode_doc.type if mode_doc else "Bank",
-                        "sales_person": None,
-                        "enabled": mode_doc.enabled if mode_doc else 1
-                    })
-            
-            return response("Available modes of payment retrieved successfully", {
-                "sales_person": sales_person,
-                "modes_of_payment": available_modes,
-                "total_modes": len(available_modes),
-                "payment_based_on_sales_person": True,
-                "override_enabled": False  # When using sales person based, no override
-            }, True, 200)
-            
-        else:
-            # Show sales person's MOP + universal modes filtered by company
-            available_modes = []
-            sales_person = frappe.db.get_value("Sales Person", {"custom_user": frappe.session.user}, "name")
-            sp_company = None
+        available_modes = []
+        seen = set()
+        for mode_detail in settings.mode_of_payment_details:
+            mop = mode_detail.mode_of_payment
+            if not mop or mop in seen:
+                continue
 
-            # Add sales person's own MOP first
-            if sales_person:
-                for detail in settings.sales_person_details:
-                    if detail.sales_person == sales_person:
-                        sp_company = detail.company
-                        if detail.mode_of_payment:
-                            mode_doc = frappe.get_doc("Mode of Payment", detail.mode_of_payment)
-                            available_modes.append({
-                                "mode_of_payment": detail.mode_of_payment,
-                                "type": "sales_person_specific",
-                                "mop_type": mode_doc.type if mode_doc else "Cash",
-                                "sales_person": sales_person,
-                                "enabled": mode_doc.enabled if mode_doc else 1
-                            })
-                        break
+            # Per-row company filter: if the MOP Details row has a company,
+            # only return it for users matching that company.
+            row_company = getattr(mode_detail, 'company', None)
+            if row_company and sp_company and row_company != sp_company:
+                continue
 
-            # Add universal modes filtered by company
-            sp_mode = available_modes[0]["mode_of_payment"] if available_modes else None
-            for mode_detail in settings.mode_of_payment_details:
-                if sp_company and getattr(mode_detail, 'company', None) and mode_detail.company != sp_company:
-                    continue
-                if mode_detail.mode_of_payment != sp_mode:
-                    mode_doc = frappe.get_doc("Mode of Payment", mode_detail.mode_of_payment)
-                    available_modes.append({
-                        "mode_of_payment": mode_detail.mode_of_payment,
-                        "type": "universal",
-                        "mop_type": mode_doc.type if mode_doc else "Bank",
-                        "sales_person": None,
-                        "enabled": mode_doc.enabled if mode_doc else 1
-                    })
-            
-            return response("Available modes of payment retrieved successfully", {
-                "sales_person": None,
-                "modes_of_payment": available_modes,
-                "total_modes": len(available_modes),
-                "payment_based_on_sales_person": False,
-                "override_enabled": False
-            }, True, 200)
-        
+            try:
+                mode_doc = frappe.get_doc("Mode of Payment", mop)
+            except Exception:
+                mode_doc = None
+
+            available_modes.append({
+                "mode_of_payment": mop,
+                "mop_type": mode_doc.type if mode_doc else None,
+                "company": row_company,
+                "enabled": mode_doc.enabled if mode_doc else 1,
+            })
+            seen.add(mop)
+
+        return response("Available modes of payment retrieved successfully", {
+            "sales_person": sales_person,
+            "company": sp_company,
+            "modes_of_payment": available_modes,
+            "total_modes": len(available_modes),
+        }, True, 200)
+
     except Exception as exception:
         frappe.log_error(frappe.get_traceback())
         return response(str(exception), {}, False, 417)
@@ -5569,21 +5510,62 @@ def get_customer_price_list(customer=None):
         return response(str(e), {}, False, 417)
 
 
+def _allowed_price_lists_for_user(user=None):
+    """
+    Return the list of Price List names the user is allowed to see based on
+    User Permission records on doctype 'Price List'.
+
+    Returns:
+        None  → no User Permission restriction (user can see all).
+        list  → restricted set; only these Price List names are allowed.
+    """
+    user = user or frappe.session.user
+    if user == "Administrator":
+        return None
+    try:
+        ups = frappe.permissions.get_user_permissions(user) or {}
+    except Exception:
+        return None
+    rows = ups.get("Price List") or []
+    if not rows:
+        return None
+    allowed = []
+    for r in rows:
+        # rows can be dicts ({doc, applicable_for}) or just strings depending on Frappe version
+        if isinstance(r, dict):
+            doc = r.get("doc") or r.get("name")
+        else:
+            doc = r
+        if doc:
+            allowed.append(doc)
+    return allowed
+
+
 @frappe.whitelist(methods="GET")
 def get_price_list():
     """
-    Get all available price lists for configuration
+    Get all enabled selling Price Lists, filtered by the current user's
+    User Permission on Price List (if any).
     """
     try:
-        price_lists = frappe.get_all("Price List", 
-                                   filters={"enabled": 1, "selling": 1}, 
-                                   fields=["name", "price_list_name", "currency"])
-        
+        allowed = _allowed_price_lists_for_user()
+        filters = {"enabled": 1, "selling": 1}
+        if allowed is not None:
+            if not allowed:
+                return response("No Price Lists allowed for this user", [], True, 200)
+            filters["name"] = ["in", allowed]
+
+        price_lists = frappe.get_all(
+            "Price List",
+            filters=filters,
+            fields=["name", "price_list_name", "currency"],
+        )
+
         if price_lists:
             return response("Price List", price_lists, True, 200)
         else:
             return response("No Price Lists found", [], True, 200)
-            
+
     except Exception as e:
         frappe.log_error(frappe.get_traceback(), "Get Price List Error")
         return response(str(e), {}, False, 417)
@@ -5610,6 +5592,16 @@ def get_price_list_details(name=None, page_number=1, page_size=20):
                 ["name", "like", f"%{name}%"],
                 ["price_list_name", "like", f"%{name}%"],
             ]
+
+        # Apply User Permission on Price List
+        allowed = _allowed_price_lists_for_user()
+        if allowed is not None:
+            if not allowed:
+                return response("Price List details fetched", {
+                    "price_lists": [], "total_count": 0,
+                    "page_number": int(page_number or 1), "page_size": _page_size,
+                }, True, 200)
+            filters["name"] = ["in", allowed]
 
         price_lists = frappe.get_all(
             "Price List",
@@ -5674,6 +5666,14 @@ def get_price_list_items(price_list=None, item_code=None, item_name=None, name=N
     try:
         if not price_list:
             return response("price_list is required", {}, False, 400)
+
+        # Enforce User Permission on Price List
+        allowed = _allowed_price_lists_for_user()
+        if allowed is not None and price_list not in allowed:
+            return response(
+                f"You are not permitted to access Price List '{price_list}'",
+                {}, False, 403,
+            )
 
         _page_size = int(page_size or 50)
         _offset = (int(page_number or 1) - 1) * _page_size
@@ -10467,6 +10467,14 @@ def get_price_list_items_bulk(params=None):
             return response("price_list is required", {}, False, 400)
         if not item_codes or not isinstance(item_codes, list):
             return response("item_codes (array) is required", {}, False, 400)
+
+        # Enforce User Permission on Price List
+        allowed = _allowed_price_lists_for_user()
+        if allowed is not None and price_list not in allowed:
+            return response(
+                f"You are not permitted to access Price List '{price_list}'",
+                {}, False, 403,
+            )
 
         # Exclude disabled items
         disabled_items = set(frappe.get_all("Item", filters={"disabled": 1}, pluck="name"))
