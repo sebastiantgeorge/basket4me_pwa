@@ -5716,9 +5716,10 @@ def get_price_list_items(price_list=None, item_code=None, item_name=None, name=N
             item_conditions.append("(it.name LIKE %s OR it.item_name LIKE %s)")
             item_values.extend([f"%{search}%", f"%{search}%"])
 
-        # If a custom mobile-app flag exists on Item, restrict to allowed items only
-        if frappe.db.has_column("Item", "custom_allow_mobile_app"):
-            item_conditions.append("(it.custom_allow_mobile_app = 1 OR it.custom_allow_mobile_app IS NULL)")
+        # NOTE: custom_allow_mobile_app filter intentionally NOT applied here.
+        # Customer requirement: get_price_list_items must return ALL active items
+        # (priced or not). Items with mobile-app flag = 0 must still appear in
+        # price list pickers. Use get_item_list for the mobile-restricted catalog.
 
         item_where = " AND ".join(item_conditions)
 
