@@ -1306,13 +1306,14 @@ def get_invoice_detail(name=None):
                             FROM `tabSales Order Item` soi
                             JOIN `tabSales Order` so2 ON so2.name = soi.parent
                             WHERE so2.customer = %s AND soi.item_code = %s AND so2.docstatus != 2
+                            AND soi.is_free_item = 0
                             UNION ALL
                             SELECT sii.rate, si.posting_date AS txn_date, si.creation
                             FROM `tabSales Invoice Item` sii
                             JOIN `tabSales Invoice` si ON si.name = sii.parent
                             WHERE si.customer = %s AND sii.item_code = %s
                               AND si.docstatus = 1 AND si.is_return = 0
-                              AND si.name != %s
+                              AND si.name != %s AND sii.is_free_item = 0
                         ) combined
                         ORDER BY txn_date DESC, creation DESC LIMIT 1
                         """,
@@ -1321,6 +1322,26 @@ def get_invoice_detail(name=None):
                     last_cust_rate = (lr[0].get("rate") or 0.0) if lr else 0.0
                 except Exception:
                     pass
+
+            # Available stock qty (salesperson warehouse or total)
+            avail_qty = 0.0
+            try:
+                sp = frappe.db.get_value("Sales Person", {"custom_user": frappe.session.user}, "name")
+                sp_wh = None
+                if sp:
+                    _settings = get_basket4me_settings()
+                    if _settings:
+                        for d in _settings.sales_person_details:
+                            if d.sales_person == sp:
+                                sp_wh = d.warehouse
+                                break
+                if sp_wh:
+                    avail_qty = flt(frappe.db.get_value("Bin", {"item_code": ic, "warehouse": sp_wh}, "actual_qty") or 0)
+                else:
+                    tq = frappe.db.sql("SELECT COALESCE(SUM(actual_qty), 0) FROM `tabBin` WHERE item_code = %s", ic)
+                    avail_qty = flt(tq[0][0]) if tq else 0.0
+            except Exception:
+                pass
 
             items.append({
                 "item_code": ic,
@@ -1351,6 +1372,7 @@ def get_invoice_detail(name=None):
                 "mrp": mrp_val,
                 "standard_selling_price": std_val,
                 "last_customer_rate": last_cust_rate,
+                "available_qty": avail_qty,
                 "currency": doc.currency,
             })
 
@@ -10184,6 +10206,7 @@ def get_pending_sales_order_items(customer=None, as_on_date=None, search=None):
                 soi.discount_percentage,
                 soi.discount_amount,
                 soi.warehouse,
+                soi.is_free_item,
                 so.transaction_date,
                 so.delivery_date,
                 so.selling_price_list
@@ -10400,6 +10423,7 @@ def get_pending_sales_order_items(customer=None, as_on_date=None, search=None):
                 "standard_selling_price": std_val,
                 "last_customer_rate": last_cust_rate,
                 "available_qty": avail_qty,
+                "is_free_item": row.get("is_free_item", 0),
             }
             detailed_items.append(detailed_item)
 
