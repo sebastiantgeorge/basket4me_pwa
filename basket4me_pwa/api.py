@@ -3847,6 +3847,16 @@ def invoice_details(invoice_id=None):
 
 @frappe.whitelist(methods="POST")
 def create_sales_invoice_return(params):
+    """Create a Sales Return (is_return=1).
+
+    `return_against` is OPTIONAL — if omitted, creates a standalone credit note
+    (no original SI linkage). When omitted:
+      - balance/over-return validation is skipped
+      - rates fall back to Item Price for the effective price list (or provided rate)
+      - update_stock follows Basket4Me Settings.ignore_create_delivery_note
+    When provided, rates/discounts are copied from the original SI items and
+    return qty is validated against (orig - already_returned).
+    """
     try:
         if isinstance(params, str):
             params = json.loads(params)
@@ -4709,9 +4719,23 @@ def create_payment_entry(params=None):
 
 
 @frappe.whitelist(methods="GET")
-def get_return_invoice_list(name=None, customer=None, status=None, search=None):
+def get_return_invoice_list(name=None, customer=None, status=None, search=None,
+                            from_date=None, to_date=None, route=None,
+                            page_number=1, page_size=20):
+    """List Sales Returns (is_return=1) with filters and pagination.
+
+    Query params:
+        name, customer, status, search: same as get_invoice_list
+        from_date / to_date: posting_date range
+        route: customer route (custom_route)
+        page_number / page_size: pagination
+    """
     try:
-        fields = ['name', 'customer', 'customer_name', 'posting_date', 'grand_total', 'outstanding_amount', 'status', 'docstatus', 'return_against', 'creation']
+        _page_size = int(page_size or 20)
+        _offset = (int(page_number or 1) - 1) * _page_size
+
+        fields = ['name', 'customer', 'customer_name', 'posting_date', 'grand_total',
+                  'outstanding_amount', 'status', 'docstatus', 'return_against', 'creation']
 
         conditions = ["si.is_return = 1"]
         values = []
@@ -4725,30 +4749,186 @@ def get_return_invoice_list(name=None, customer=None, status=None, search=None):
             values.append(customer)
 
         if status:
-            conditions.append("si.status = %s")
-            values.append(status)
+            if status == "Draft":
+                conditions.append("si.docstatus = 0")
+            elif status == "Cancelled":
+                conditions.append("si.docstatus = 2")
+            else:
+                conditions.append("si.docstatus = 1")
+                conditions.append("si.status = %s")
+                values.append(status)
 
         if search:
             conditions.append("(si.name LIKE %s OR si.customer_name LIKE %s)")
             values.append(f"%{search}%")
             values.append(f"%{search}%")
 
+        if from_date:
+            conditions.append("si.posting_date >= %s")
+            values.append(from_date)
+        if to_date:
+            conditions.append("si.posting_date <= %s")
+            values.append(to_date)
+
+        # Route filter via Customer.custom_route
+        if route:
+            route_customers = frappe.get_all("Customer", filters={"custom_route": route}, pluck="name")
+            if not route_customers:
+                return response("Return Invoice List", {
+                    "invoices": [], "total_count": 0,
+                    "page_number": int(page_number or 1), "page_size": _page_size,
+                }, True, 200)
+            placeholders = ",".join(["%s"] * len(route_customers))
+            conditions.append(f"si.customer IN ({placeholders})")
+            values.extend(route_customers)
+
+        # Sales-team restriction unless override enabled
+        if not should_override_sales_team():
+            sales_person = frappe.db.get_value("Sales Person", {"custom_user": frappe.session.user}, "name")
+            if sales_person:
+                conditions.append("""si.name IN (
+                    SELECT parent FROM `tabSales Team`
+                    WHERE sales_person = %s AND parenttype = 'Sales Invoice'
+                )""")
+                values.append(sales_person)
+            else:
+                conditions.append("1=0")
+
         where_clause = " AND ".join(conditions)
         si_fields = ", ".join([f"si.{f}" for f in fields])
 
-        invoice_list = frappe.db.sql(
-            f"SELECT {si_fields}, c.mobile_no FROM `tabSales Invoice` si LEFT JOIN `tabCustomer` c ON si.customer = c.name WHERE {where_clause} ORDER BY si.posting_date DESC, si.creation DESC",
-            values,
-            as_dict=True,
-        )
+        count_sql = f"SELECT COUNT(*) FROM `tabSales Invoice` si WHERE {where_clause}"
+        total_count = frappe.db.sql(count_sql, values)[0][0]
 
-        if invoice_list:
-            return response("Invoice List", invoice_list, True, 200)
-        else:
-            return response("No Invoice List", [], True, 200)
+        sql = f"""
+            SELECT {si_fields}, c.mobile_no, c.custom_route AS route
+            FROM `tabSales Invoice` si
+            LEFT JOIN `tabCustomer` c ON si.customer = c.name
+            WHERE {where_clause}
+            ORDER BY si.posting_date DESC, si.creation DESC
+            LIMIT %s OFFSET %s
+        """
+        invoice_list = frappe.db.sql(sql, values + [_page_size, _offset], as_dict=True)
+
+        return response("Return Invoice List", {
+            "invoices": invoice_list or [],
+            "total_count": total_count,
+            "page_number": int(page_number or 1),
+            "page_size": _page_size,
+        }, True, 200)
     except Exception as exception:
         frappe.log_error(frappe.get_traceback())
         return response(str(exception), {}, False, 417)
+
+
+@frappe.whitelist(methods="GET")
+def get_sales_return_detail(name=None):
+    """Get full detail of a single Sales Return (is_return=1)."""
+    try:
+        if not name:
+            return response("Sales Return name is required", {}, False, 400)
+        if not frappe.db.exists("Sales Invoice", name):
+            return response(f"Sales Return '{name}' not found", {}, False, 404)
+        is_ret = frappe.db.get_value("Sales Invoice", name, "is_return")
+        if not is_ret:
+            return response(f"'{name}' is not a Sales Return", {}, False, 400)
+        # Reuse get_invoice_detail logic
+        return get_invoice_detail(name=name)
+    except Exception as e:
+        frappe.log_error(frappe.get_traceback(), "Get Sales Return Detail Error")
+        return response(str(e), {}, False, 417)
+
+
+@frappe.whitelist(methods="POST")
+def update_sales_return(params):
+    """Update a draft Sales Return (is_return=1, docstatus=0)."""
+    try:
+        if isinstance(params, str):
+            params = json.loads(params)
+        name = params.get("name")
+        if not name:
+            return response("Sales Return name is required", {}, False, 400)
+        if not frappe.db.exists("Sales Invoice", name):
+            return response(f"Sales Return '{name}' not found", {}, False, 404)
+        is_ret, docstatus = frappe.db.get_value("Sales Invoice", name, ["is_return", "docstatus"])
+        if not is_ret:
+            return response(f"'{name}' is not a Sales Return", {}, False, 400)
+        if docstatus != 0:
+            return response(f"Only Draft Sales Returns can be updated. '{name}' is submitted/cancelled", {}, False, 400)
+        # Reuse update_sales_invoice — same fields + items handling
+        return update_sales_invoice(params)
+    except Exception as e:
+        frappe.db.rollback()
+        frappe.log_error(frappe.get_traceback(), "Update Sales Return Error")
+        return response(str(e), {}, False, 417)
+
+
+@frappe.whitelist(methods="POST")
+def submit_sales_return(params):
+    """Submit a draft Sales Return."""
+    try:
+        if isinstance(params, str):
+            params = json.loads(params)
+        name = params.get("name")
+        if not name:
+            return response("Sales Return name is required", {}, False, 400)
+        if not frappe.db.exists("Sales Invoice", name):
+            return response(f"Sales Return '{name}' not found", {}, False, 404)
+        if not frappe.db.get_value("Sales Invoice", name, "is_return"):
+            return response(f"'{name}' is not a Sales Return", {}, False, 400)
+        # Allow negative stock for returns
+        frappe.flags.ignore_negative_stock = True
+        try:
+            return submit_sales_invoice(params)
+        finally:
+            frappe.flags.ignore_negative_stock = False
+    except Exception as e:
+        frappe.db.rollback()
+        frappe.flags.ignore_negative_stock = False
+        frappe.log_error(frappe.get_traceback(), "Submit Sales Return Error")
+        return response(str(e), {}, False, 417)
+
+
+@frappe.whitelist(methods="POST")
+def cancel_sales_return(params):
+    """Cancel a submitted Sales Return."""
+    try:
+        if isinstance(params, str):
+            params = json.loads(params)
+        name = params.get("name")
+        if not name:
+            return response("Sales Return name is required", {}, False, 400)
+        if not frappe.db.exists("Sales Invoice", name):
+            return response(f"Sales Return '{name}' not found", {}, False, 404)
+        if not frappe.db.get_value("Sales Invoice", name, "is_return"):
+            return response(f"'{name}' is not a Sales Return", {}, False, 400)
+        return cancel_sales_invoice(params)
+    except Exception as e:
+        frappe.db.rollback()
+        frappe.log_error(frappe.get_traceback(), "Cancel Sales Return Error")
+        return response(str(e), {}, False, 417)
+
+
+@frappe.whitelist(methods="POST")
+def delete_sales_return(params):
+    """Delete a draft Sales Return."""
+    try:
+        if isinstance(params, str):
+            params = json.loads(params)
+        name = params.get("name")
+        if not name:
+            return response("Sales Return name is required", {}, False, 400)
+        if not frappe.db.exists("Sales Invoice", name):
+            return response(f"Sales Return '{name}' not found", {}, False, 404)
+        is_ret, docstatus = frappe.db.get_value("Sales Invoice", name, ["is_return", "docstatus"])
+        if not is_ret:
+            return response(f"'{name}' is not a Sales Return", {}, False, 400)
+        if docstatus != 0:
+            return response(f"Only Draft Sales Returns can be deleted. '{name}' is submitted/cancelled", {}, False, 400)
+        return delete_sales_invoice(params)
+    except Exception as e:
+        frappe.log_error(frappe.get_traceback(), "Delete Sales Return Error")
+        return response(str(e), {}, False, 417)
 
 
 @frappe.whitelist(methods="GET")
