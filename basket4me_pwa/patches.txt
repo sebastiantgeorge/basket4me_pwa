@@ -4,4 +4,4 @@
 
 [post_model_sync]
 # Patches added in this section will be executed after doctypes are migrated
-basket4me_pwa.patches.v1_0.remove_custom_unpaid_refs
+# basket4me_pwa.patches.v1_0.remove_custom_unpaid_refs  # DISABLED: custom_unpaid is now a real field (re-added in fixtures). Patch already ran once and cleared the original orphan refs.

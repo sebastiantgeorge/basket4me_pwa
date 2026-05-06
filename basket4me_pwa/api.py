@@ -1224,18 +1224,23 @@ def get_invoice_list(name=None, customer=None, status=None, search=None,
                 for it in inv["items"]:
                     it["ordered_qty"] = it.get("custom_ordered_qty")
 
-                # UnPaid = customer's TOTAL cumulative outstanding (all submitted SIs, not just this one)
-                inv["UnPaid"] = 0.0
-                if cust:
-                    total_unpaid = frappe.db.sql(
-                        """
-                        SELECT COALESCE(SUM(outstanding_amount), 0)
-                        FROM `tabSales Invoice`
-                        WHERE customer = %s AND docstatus = 1 AND outstanding_amount > 0
-                        """,
-                        cust,
+                # UnPaid = boolean flag set by salesperson post-submit (custom_unpaid Check field).
+                # Audit: who toggled it last and when.
+                inv["UnPaid"] = 0
+                inv["UnPaid_updated_by"] = None
+                inv["UnPaid_updated_on"] = None
+                if frappe.db.has_column("Sales Invoice", "custom_unpaid"):
+                    row = frappe.db.get_value(
+                        "Sales Invoice", inv["name"],
+                        ["custom_unpaid", "custom_unpaid_updated_by", "custom_unpaid_updated_on"],
+                        as_dict=True,
                     )
-                    inv["UnPaid"] = flt(total_unpaid[0][0] if total_unpaid else 0)
+                    if row:
+                        inv["UnPaid"] = int(row.get("custom_unpaid") or 0)
+                        inv["UnPaid_updated_by"] = row.get("custom_unpaid_updated_by")
+                        inv["UnPaid_updated_on"] = (
+                            str(row["custom_unpaid_updated_on"]) if row.get("custom_unpaid_updated_on") else None
+                        )
 
                 # PreviousInvoiceReceipt = receipt (Payment Entry) that paid this customer's
                 # PREVIOUS Sales Invoice (the SI immediately before this one by posting_date/creation).
@@ -1522,6 +1527,95 @@ def get_invoice_detail(name=None):
         return response(f"Sales Invoice '{name}' not found", {}, False, 404)
     except Exception as e:
         frappe.log_error(frappe.get_traceback(), "Invoice Detail Error")
+        return response(str(e), {}, False, 417)
+
+
+@frappe.whitelist(methods="POST")
+def update_invoice_unpaid_status(params):
+    """Toggle the UnPaid (custom_unpaid) flag on a submitted Sales Invoice.
+
+    Args (via params dict):
+        name: Sales Invoice name (required)
+        unpaid: 0 or 1 (required) — 1 marks as unpaid, 0 clears
+
+    Writes audit fields custom_unpaid_updated_by (current user) and
+    custom_unpaid_updated_on (now). Logs a Comment on the SI for
+    permanent who/when trail (also visible in Frappe's Version log via
+    track_changes on Sales Invoice).
+    """
+    try:
+        if isinstance(params, str):
+            params = json.loads(params)
+
+        name = params.get("name")
+        unpaid = params.get("unpaid")
+
+        if not name:
+            return response("Sales Invoice name is required", {}, False, 400)
+        if unpaid is None:
+            return response("'unpaid' (0 or 1) is required", {}, False, 400)
+
+        unpaid_int = 1 if int(unpaid) else 0
+
+        if not frappe.db.exists("Sales Invoice", name):
+            return response(f"Sales Invoice '{name}' not found", {}, False, 404)
+
+        docstatus = frappe.db.get_value("Sales Invoice", name, "docstatus")
+        if docstatus != 1:
+            return response(
+                f"UnPaid can only be updated on submitted invoices. '{name}' docstatus={docstatus}",
+                {}, False, 400,
+            )
+
+        if not frappe.db.has_column("Sales Invoice", "custom_unpaid"):
+            return response(
+                "custom_unpaid field is not yet migrated. Run `bench migrate` after deploy.",
+                {}, False, 500,
+            )
+
+        prev = frappe.db.get_value("Sales Invoice", name, "custom_unpaid") or 0
+        now_user = frappe.session.user
+        now_ts = frappe.utils.now()
+
+        # Direct DB update — Sales Invoice has allow_on_submit=1 on these fields
+        # but using db.set_value avoids triggering on_update_after_submit hooks.
+        frappe.db.set_value(
+            "Sales Invoice", name,
+            {
+                "custom_unpaid": unpaid_int,
+                "custom_unpaid_updated_by": now_user,
+                "custom_unpaid_updated_on": now_ts,
+            },
+            update_modified=True,
+        )
+
+        # Audit comment for permanent who/when trail
+        action = "marked UnPaid" if unpaid_int else "cleared UnPaid"
+        try:
+            frappe.get_doc({
+                "doctype": "Comment",
+                "comment_type": "Info",
+                "reference_doctype": "Sales Invoice",
+                "reference_name": name,
+                "content": f"{action} (was {int(prev)} → {unpaid_int}) by {now_user} at {now_ts}",
+            }).insert(ignore_permissions=True)
+        except Exception:
+            # Comment failure must not break the update
+            frappe.log_error(frappe.get_traceback(), "UnPaid Comment Insert Error")
+
+        frappe.db.commit()
+
+        return response(f"UnPaid {'set' if unpaid_int else 'cleared'} on '{name}'", {
+            "name": name,
+            "UnPaid": unpaid_int,
+            "UnPaid_updated_by": now_user,
+            "UnPaid_updated_on": str(now_ts),
+            "previous_value": int(prev),
+        }, True, 200)
+
+    except Exception as e:
+        frappe.db.rollback()
+        frappe.log_error(frappe.get_traceback(), "Update UnPaid Status Error")
         return response(str(e), {}, False, 417)
 
 
