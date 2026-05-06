@@ -1224,6 +1224,35 @@ def get_invoice_list(name=None, customer=None, status=None, search=None,
                 for it in inv["items"]:
                     it["ordered_qty"] = it.get("custom_ordered_qty")
 
+                # UnPaid = this invoice's outstanding amount
+                inv["UnPaid"] = flt(inv.get("outstanding_amount") or 0)
+
+                # PreviousInvoiceReceipt = most recent Payment Entry (Receive) from this
+                # customer before this invoice's posting_date — for "Last Received" on bill print
+                inv["PreviousInvoiceReceipt"] = None
+                if cust and inv.get("posting_date"):
+                    prev_pe = frappe.db.sql(
+                        """
+                        SELECT name, posting_date, paid_amount, mode_of_payment, reference_no
+                        FROM `tabPayment Entry`
+                        WHERE party_type = 'Customer' AND party = %s
+                          AND payment_type = 'Receive' AND docstatus = 1
+                          AND posting_date < %s
+                        ORDER BY posting_date DESC, creation DESC
+                        LIMIT 1
+                        """,
+                        (cust, inv["posting_date"]),
+                        as_dict=True,
+                    )
+                    if prev_pe:
+                        inv["PreviousInvoiceReceipt"] = {
+                            "name": prev_pe[0]["name"],
+                            "posting_date": str(prev_pe[0]["posting_date"]) if prev_pe[0].get("posting_date") else None,
+                            "paid_amount": flt(prev_pe[0].get("paid_amount") or 0),
+                            "mode_of_payment": prev_pe[0].get("mode_of_payment"),
+                            "reference_no": prev_pe[0].get("reference_no"),
+                        }
+
         return response("Invoice List", {
             "invoices": invoice_list or [],
             "total_count": total_count if 'total_count' in dir() else len(invoice_list or []),
