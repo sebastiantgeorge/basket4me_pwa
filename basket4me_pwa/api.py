@@ -1620,6 +1620,113 @@ def update_invoice_unpaid_status(params):
 
 
 @frappe.whitelist(methods="GET")
+def last_invoice_cust_receipt(user_id=None, date=None):
+    """Return UnPaid status of the most recent Sales Invoice created by a
+    given user on a given date, plus the last receipt (Payment Entry) for
+    that invoice's customer on the same date.
+
+    Query params:
+        user_id: defaults to frappe.session.user
+        date:    defaults to today (posting_date used for both SI and PE)
+
+    Response shape:
+        {
+            "user_id": "<user>",
+            "date": "YYYY-MM-DD",
+            "invoice": {"name", "customer", "customer_name", "posting_date",
+                        "grand_total", "outstanding_amount"} | null,
+            "UnPaid": 0 | 1,                         # null if no invoice
+            "receipt": {"receipt_no", "date", "value"} | null
+        }
+    """
+    try:
+        user_id = user_id or frappe.session.user
+        date = date or nowdate()
+
+        # 1) Last SI created by user on date (submitted, non-return)
+        si_row = frappe.db.sql(
+            """
+            SELECT name, customer, customer_name, posting_date,
+                   grand_total, outstanding_amount,
+                   COALESCE(custom_unpaid, 0) AS custom_unpaid
+            FROM `tabSales Invoice`
+            WHERE owner = %s AND posting_date = %s
+              AND docstatus = 1 AND is_return = 0
+            ORDER BY creation DESC
+            LIMIT 1
+            """ if frappe.db.has_column("Sales Invoice", "custom_unpaid") else
+            """
+            SELECT name, customer, customer_name, posting_date,
+                   grand_total, outstanding_amount,
+                   0 AS custom_unpaid
+            FROM `tabSales Invoice`
+            WHERE owner = %s AND posting_date = %s
+              AND docstatus = 1 AND is_return = 0
+            ORDER BY creation DESC
+            LIMIT 1
+            """,
+            (user_id, date),
+            as_dict=True,
+        )
+
+        if not si_row:
+            return response("No invoice found for user/date", {
+                "user_id": user_id,
+                "date": str(date),
+                "invoice": None,
+                "UnPaid": None,
+                "receipt": None,
+            }, True, 200)
+
+        si = si_row[0]
+        customer = si["customer"]
+        unpaid = int(si.get("custom_unpaid") or 0)
+
+        # 2) Last receipt (Payment Entry, Receive) for that customer on the same date
+        pe_row = frappe.db.sql(
+            """
+            SELECT name, posting_date, paid_amount
+            FROM `tabPayment Entry`
+            WHERE party_type = 'Customer' AND party = %s
+              AND payment_type = 'Receive' AND docstatus = 1
+              AND posting_date = %s
+            ORDER BY creation DESC
+            LIMIT 1
+            """,
+            (customer, date),
+            as_dict=True,
+        )
+
+        receipt = None
+        if pe_row:
+            r = pe_row[0]
+            receipt = {
+                "receipt_no": r["name"],
+                "date": str(r["posting_date"]) if r.get("posting_date") else None,
+                "value": flt(r.get("paid_amount") or 0),
+            }
+
+        return response("Last invoice/receipt fetched", {
+            "user_id": user_id,
+            "date": str(date),
+            "invoice": {
+                "name": si["name"],
+                "customer": si["customer"],
+                "customer_name": si.get("customer_name"),
+                "posting_date": str(si["posting_date"]) if si.get("posting_date") else None,
+                "grand_total": flt(si.get("grand_total") or 0),
+                "outstanding_amount": flt(si.get("outstanding_amount") or 0),
+            },
+            "UnPaid": unpaid,
+            "receipt": receipt,
+        }, True, 200)
+
+    except Exception as e:
+        frappe.log_error(frappe.get_traceback(), "Last Invoice/Cust Receipt Error")
+        return response(str(e), {}, False, 417)
+
+
+@frappe.whitelist(methods="GET")
 def get_customer_list(name=None, mobile_no=None):
     try:
         override_enabled = should_override_sales_team()
