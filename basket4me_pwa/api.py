@@ -4231,8 +4231,8 @@ def create_sales_invoice_return(params):
             return _orig_check_perm(self, permtype, permlevel)
         Document.check_permission = _patched_check_perm
         try:
+            # Save as Draft only — submission is handled by submit_sales_return
             sales_invoice.save()
-            sales_invoice.submit()
         finally:
             Document.check_permission = _orig_check_perm
             frappe.flags.ignore_negative_stock = False
@@ -4252,11 +4252,12 @@ def create_sales_invoice_return(params):
             "total_taxes_and_charges": sales_invoice.total_taxes_and_charges,
             "grand_total": sales_invoice.grand_total,
             "status": sales_invoice.status,
+            "docstatus": sales_invoice.docstatus,
             "company": sales_invoice.company,
             "effective_price_list": effective_price_list  # Include for reference
         }
 
-        return response("Sales Invoice Details", response_data, True, 201)
+        return response("Sales Return created (Draft)", response_data, True, 201)
 
     except Exception as e:
         frappe.flags.ignore_negative_stock = False
