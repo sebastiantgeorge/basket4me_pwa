@@ -1224,34 +1224,83 @@ def get_invoice_list(name=None, customer=None, status=None, search=None,
                 for it in inv["items"]:
                     it["ordered_qty"] = it.get("custom_ordered_qty")
 
-                # UnPaid = this invoice's outstanding amount
-                inv["UnPaid"] = flt(inv.get("outstanding_amount") or 0)
-
-                # PreviousInvoiceReceipt = most recent Payment Entry (Receive) from this
-                # customer before this invoice's posting_date — for "Last Received" on bill print
-                inv["PreviousInvoiceReceipt"] = None
-                if cust and inv.get("posting_date"):
-                    prev_pe = frappe.db.sql(
+                # UnPaid = customer's TOTAL cumulative outstanding (all submitted SIs, not just this one)
+                inv["UnPaid"] = 0.0
+                if cust:
+                    total_unpaid = frappe.db.sql(
                         """
-                        SELECT name, posting_date, paid_amount, mode_of_payment, reference_no
-                        FROM `tabPayment Entry`
-                        WHERE party_type = 'Customer' AND party = %s
-                          AND payment_type = 'Receive' AND docstatus = 1
-                          AND posting_date < %s
+                        SELECT COALESCE(SUM(outstanding_amount), 0)
+                        FROM `tabSales Invoice`
+                        WHERE customer = %s AND docstatus = 1 AND outstanding_amount > 0
+                        """,
+                        cust,
+                    )
+                    inv["UnPaid"] = flt(total_unpaid[0][0] if total_unpaid else 0)
+
+                # PreviousInvoiceReceipt = receipt (Payment Entry) that paid this customer's
+                # PREVIOUS Sales Invoice (the SI immediately before this one by posting_date/creation).
+                inv["PreviousInvoiceReceipt"] = None
+                if cust:
+                    # 1) Find the previous SI for this customer
+                    prev_si = frappe.db.sql(
+                        """
+                        SELECT name, posting_date, grand_total, outstanding_amount
+                        FROM `tabSales Invoice`
+                        WHERE customer = %s AND is_return = 0 AND docstatus = 1
+                          AND name != %s
+                          AND (
+                                posting_date < %s
+                                OR (posting_date = %s AND creation < %s)
+                              )
                         ORDER BY posting_date DESC, creation DESC
                         LIMIT 1
                         """,
-                        (cust, inv["posting_date"]),
+                        (cust, inv["name"], inv.get("posting_date"), inv.get("posting_date"), inv.get("creation")),
                         as_dict=True,
                     )
-                    if prev_pe:
-                        inv["PreviousInvoiceReceipt"] = {
-                            "name": prev_pe[0]["name"],
-                            "posting_date": str(prev_pe[0]["posting_date"]) if prev_pe[0].get("posting_date") else None,
-                            "paid_amount": flt(prev_pe[0].get("paid_amount") or 0),
-                            "mode_of_payment": prev_pe[0].get("mode_of_payment"),
-                            "reference_no": prev_pe[0].get("reference_no"),
-                        }
+                    if prev_si:
+                        prev_si_name = prev_si[0]["name"]
+                        # 2) Find the Payment Entry that allocated to that previous SI
+                        prev_pe = frappe.db.sql(
+                            """
+                            SELECT pe.name, pe.posting_date, per.allocated_amount,
+                                   pe.paid_amount, pe.mode_of_payment, pe.reference_no
+                            FROM `tabPayment Entry Reference` per
+                            JOIN `tabPayment Entry` pe ON pe.name = per.parent
+                            WHERE per.reference_doctype = 'Sales Invoice'
+                              AND per.reference_name = %s
+                              AND pe.docstatus = 1
+                            ORDER BY pe.posting_date DESC, pe.creation DESC
+                            LIMIT 1
+                            """,
+                            prev_si_name,
+                            as_dict=True,
+                        )
+                        if prev_pe:
+                            inv["PreviousInvoiceReceipt"] = {
+                                "name": prev_pe[0]["name"],
+                                "posting_date": str(prev_pe[0]["posting_date"]) if prev_pe[0].get("posting_date") else None,
+                                "allocated_amount": flt(prev_pe[0].get("allocated_amount") or 0),
+                                "paid_amount": flt(prev_pe[0].get("paid_amount") or 0),
+                                "mode_of_payment": prev_pe[0].get("mode_of_payment"),
+                                "reference_no": prev_pe[0].get("reference_no"),
+                                "previous_invoice": prev_si_name,
+                                "previous_invoice_grand_total": flt(prev_si[0].get("grand_total") or 0),
+                                "previous_invoice_outstanding": flt(prev_si[0].get("outstanding_amount") or 0),
+                            }
+                        else:
+                            # No receipt for previous SI yet — still expose the previous SI ref
+                            inv["PreviousInvoiceReceipt"] = {
+                                "name": None,
+                                "posting_date": None,
+                                "allocated_amount": 0,
+                                "paid_amount": 0,
+                                "mode_of_payment": None,
+                                "reference_no": None,
+                                "previous_invoice": prev_si_name,
+                                "previous_invoice_grand_total": flt(prev_si[0].get("grand_total") or 0),
+                                "previous_invoice_outstanding": flt(prev_si[0].get("outstanding_amount") or 0),
+                            }
 
         return response("Invoice List", {
             "invoices": invoice_list or [],
