@@ -10125,6 +10125,10 @@ def create_si_from_dn(params):
 def get_invoices_for_return(customer=None):
     """
     Get submitted Sales Invoices (non-return) for a customer that can be used for return.
+    Each SI item is enriched with the same shape as get_price_list_items items:
+    name, item_code, item_name, uom, default_uom, uoms[], price_list_rate, currency,
+    valid_from, valid_upto, batch_no, mrp, standard_selling_price, last_customer_rate,
+    available_qty -- plus SI-specific qty, rate, amount, returned_qty, returnable_qty.
     """
     try:
         if not customer:
@@ -10134,31 +10138,191 @@ def get_invoices_for_return(customer=None):
             "Sales Invoice",
             filters={"customer": customer, "docstatus": 1, "is_return": 0, "status": ["not in", ["Cancelled"]]},
             fields=["name", "customer", "customer_name", "posting_date", "status",
-                     "total", "grand_total", "outstanding_amount"],
+                    "total", "grand_total", "outstanding_amount", "selling_price_list", "currency"],
             order_by="posting_date desc",
         )
 
+        # Resolve salesperson warehouse once for available_qty enrichment
+        sp_warehouse = None
+        try:
+            sp = frappe.db.get_value("Sales Person", {"custom_user": frappe.session.user}, "name")
+            settings = get_basket4me_settings()
+            if sp and settings:
+                for d in settings.sales_person_details:
+                    if d.sales_person == sp:
+                        sp_warehouse = d.warehouse
+                        break
+        except Exception:
+            pass
+
+        def _enrich_item(ic, inv_price_list, inv_currency):
+            """Compute the price-list-items shape for a given item code."""
+            stock_uom = frappe.db.get_value("Item", ic, "stock_uom") or "Nos"
+
+            # Item Price for the SI's selling price list (best match: stock_uom > recent)
+            ip_row = None
+            if inv_price_list:
+                ip = frappe.db.sql("""
+                    SELECT name, uom, price_list_rate, currency, valid_from, valid_upto, batch_no
+                    FROM `tabItem Price`
+                    WHERE selling = 1 AND item_code = %s AND price_list = %s
+                    ORDER BY CASE WHEN uom = %s THEN 0 ELSE 1 END,
+                             valid_from DESC, creation DESC
+                    LIMIT 1
+                """, (ic, inv_price_list, stock_uom), as_dict=True)
+                if ip:
+                    ip_row = ip[0]
+
+            # All UOMs with conversion factor + rate from SI's price list
+            uoms_list = []
+            ud_rows = frappe.db.sql("""
+                SELECT uom, conversion_factor
+                FROM `tabUOM Conversion Detail`
+                WHERE parent = %s AND parenttype = 'Item'
+                ORDER BY idx ASC
+            """, ic, as_dict=True) or [{"uom": stock_uom, "conversion_factor": 1.0}]
+            for ud in ud_rows:
+                u = ud.get("uom")
+                cf = ud.get("conversion_factor", 1.0)
+                uom_rate = 0.0
+                if inv_price_list:
+                    rr = frappe.db.sql("""
+                        SELECT price_list_rate FROM `tabItem Price`
+                        WHERE selling = 1 AND item_code = %s AND price_list = %s
+                        AND (uom = %s OR uom IS NULL OR uom = '')
+                        ORDER BY CASE WHEN uom = %s THEN 0 ELSE 1 END, creation DESC
+                        LIMIT 1
+                    """, (ic, inv_price_list, u, u), as_dict=True)
+                    uom_rate = flt(rr[0]["price_list_rate"]) if rr else 0.0
+                uoms_list.append({"uom": u, "conversion_factor": cf, "rate": uom_rate})
+
+            # MRP (from "MRP" price list at stock_uom)
+            mrp_row = frappe.db.sql("""
+                SELECT price_list_rate FROM `tabItem Price`
+                WHERE selling = 1 AND item_code = %s AND price_list = 'MRP'
+                AND (uom = %s OR uom IS NULL OR uom = '')
+                ORDER BY valid_from DESC, creation DESC LIMIT 1
+            """, (ic, stock_uom), as_dict=True)
+            mrp = flt(mrp_row[0]["price_list_rate"]) if mrp_row else 0.0
+
+            # Standard Selling Price
+            std_row = frappe.db.sql("""
+                SELECT price_list_rate FROM `tabItem Price`
+                WHERE selling = 1 AND item_code = %s AND price_list = 'Standard Selling'
+                AND (uom = %s OR uom IS NULL OR uom = '')
+                ORDER BY valid_from DESC, creation DESC LIMIT 1
+            """, (ic, stock_uom), as_dict=True)
+            std_price = flt(std_row[0]["price_list_rate"]) if std_row else 0.0
+
+            # Last Customer Rate (excludes free-item rows)
+            lcr = 0.0
+            try:
+                last = frappe.db.sql("""
+                    SELECT rate FROM (
+                        SELECT soi.rate, so2.transaction_date as txn_date, so2.creation
+                        FROM `tabSales Order Item` soi
+                        JOIN `tabSales Order` so2 ON so2.name = soi.parent
+                        WHERE so2.customer = %s AND soi.item_code = %s
+                        AND so2.docstatus != 2 AND soi.is_free_item = 0
+                        UNION ALL
+                        SELECT sii.rate, si.posting_date as txn_date, si.creation
+                        FROM `tabSales Invoice Item` sii
+                        JOIN `tabSales Invoice` si ON si.name = sii.parent
+                        WHERE si.customer = %s AND sii.item_code = %s
+                        AND si.docstatus = 1 AND si.is_return = 0
+                        AND sii.is_free_item = 0
+                    ) combined
+                    ORDER BY txn_date DESC, creation DESC LIMIT 1
+                """, (customer, ic, customer, ic), as_dict=True)
+                if last:
+                    lcr = flt(last[0].get("rate") or 0)
+            except Exception:
+                pass
+
+            # Available qty (salesperson warehouse > total)
+            avail = 0.0
+            try:
+                if sp_warehouse:
+                    avail = flt(frappe.db.get_value("Bin", {"item_code": ic, "warehouse": sp_warehouse}, "actual_qty") or 0)
+                else:
+                    tq = frappe.db.sql("SELECT COALESCE(SUM(actual_qty), 0) FROM `tabBin` WHERE item_code = %s", ic)
+                    avail = flt(tq[0][0]) if tq else 0.0
+            except Exception:
+                pass
+
+            return {
+                "default_uom": stock_uom,
+                "uoms": uoms_list,
+                "mrp": mrp,
+                "standard_selling_price": std_price,
+                "last_customer_rate": lcr,
+                "available_qty": avail,
+                "ip_name": ip_row.get("name") if ip_row else None,
+                "ip_uom": ip_row.get("uom") if ip_row else None,
+                "ip_currency": ip_row.get("currency") if ip_row else None,
+                "ip_valid_from": str(ip_row["valid_from"]) if ip_row and ip_row.get("valid_from") else None,
+                "ip_valid_upto": str(ip_row["valid_upto"]) if ip_row and ip_row.get("valid_upto") else None,
+                "ip_batch_no": ip_row.get("batch_no") if ip_row else None,
+            }
+
         for inv in invoices:
-            inv["items"] = frappe.get_all(
+            inv_price_list = inv.get("selling_price_list")
+            inv_currency = inv.get("currency")
+
+            sii_rows = frappe.get_all(
                 "Sales Invoice Item",
                 filters={"parent": inv["name"]},
-                fields=["name", "item_code", "item_name", "qty", "uom", "rate", "amount"],
+                fields=["name", "item_code", "item_name", "qty", "uom", "rate", "amount",
+                        "price_list_rate", "batch_no", "is_free_item"],
             )
-            # Get already returned qty
-            for item in inv["items"]:
+
+            enriched_items = []
+            for sii in sii_rows:
+                ic = sii["item_code"]
+                meta = _enrich_item(ic, inv_price_list, inv_currency)
+
+                # Returned qty (UOM-agnostic per item_code)
                 returned = frappe.db.sql("""
                     SELECT COALESCE(SUM(ABS(sii.qty)), 0)
                     FROM `tabSales Invoice Item` sii
                     JOIN `tabSales Invoice` si ON sii.parent = si.name
                     WHERE si.is_return = 1 AND si.docstatus = 1
                     AND si.return_against = %s AND sii.item_code = %s
-                """, (inv["name"], item["item_code"]))[0][0] or 0
-                item["returned_qty"] = returned
-                item["returnable_qty"] = flt(item["qty"]) - flt(returned)
+                """, (inv["name"], ic))[0][0] or 0
+
+                item_dict = {
+                    # Match get_price_list_items shape
+                    "name": meta["ip_name"],  # Item Price record name (matches price-list shape)
+                    "item_code": ic,
+                    "item_name": sii.get("item_name"),
+                    "uom": meta["ip_uom"] or sii.get("uom") or meta["default_uom"],
+                    "price_list_rate": flt(sii.get("price_list_rate") or 0),
+                    "currency": meta["ip_currency"] or inv_currency,
+                    "valid_from": meta["ip_valid_from"],
+                    "valid_upto": meta["ip_valid_upto"],
+                    "batch_no": sii.get("batch_no") or meta["ip_batch_no"],
+                    "default_uom": meta["default_uom"],
+                    "uoms": meta["uoms"],
+                    "mrp": meta["mrp"],
+                    "standard_selling_price": meta["standard_selling_price"],
+                    "last_customer_rate": meta["last_customer_rate"],
+                    "available_qty": meta["available_qty"],
+                    # SI-item-specific
+                    "sii_name": sii.get("name"),
+                    "qty": flt(sii.get("qty") or 0),
+                    "rate": flt(sii.get("rate") or 0),
+                    "amount": flt(sii.get("amount") or 0),
+                    "is_free_item": sii.get("is_free_item") or 0,
+                    "returned_qty": flt(returned),
+                    "returnable_qty": flt(sii.get("qty") or 0) - flt(returned),
+                }
+                enriched_items.append(item_dict)
+
+            inv["items"] = enriched_items
 
         return response("Invoices for return", {"invoices": invoices}, True, 200)
     except Exception as e:
-        frappe.log_error(title="Get Invoices For Return Error", message=str(e))
+        frappe.log_error(title="Get Invoices For Return Error", message=frappe.get_traceback())
         return response(str(e), {}, False, 500)
 
 
