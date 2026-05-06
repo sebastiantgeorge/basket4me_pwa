@@ -4899,6 +4899,13 @@ def get_return_invoice_list(name=None, customer=None, status=None, search=None,
         return response(str(exception), {}, False, 417)
 
 
+@frappe.whitelist(methods="POST")
+def create_sales_return(params):
+    """Alias of create_sales_invoice_return — naming consistent with other
+    return APIs (get/update/submit/cancel/delete_sales_return)."""
+    return create_sales_invoice_return(params)
+
+
 @frappe.whitelist(methods="GET")
 def get_sales_return_detail(name=None):
     """Get full detail of a single Sales Return (is_return=1)."""
