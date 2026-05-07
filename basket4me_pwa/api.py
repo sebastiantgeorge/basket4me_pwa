@@ -4893,6 +4893,12 @@ def create_payment_entry(params=None):
             if not inv.get("invoice_id"):
                 return response("Missing required parameter: 'invoice_id' (or 'invoice' or 'reference_name') in invoices array", {}, False, 400)
 
+        # Default posting & reference dates to today when not supplied —
+        # bank-transaction PEs (mode_of_payment.type='Bank') require
+        # reference_date even if frontend only sends reference_no.
+        posting_date_val = params.get("posting_date") or params.get("reference_date") or nowdate()
+        reference_date_val = params.get("reference_date") or posting_date_val
+
         return_invoices = []
         non_return_invoices = []
         payment_entry = None  # Initialize to avoid unbound variable
@@ -4910,11 +4916,11 @@ def create_payment_entry(params=None):
             payment_entry.party_type = "Customer"
             payment_entry.party = params["party"]
             payment_entry.payment_type = "Pay"
-            payment_entry.posting_date = params.get("reference_date")
+            payment_entry.posting_date = posting_date_val
             payment_entry.paid_amount = params["paid_amount"]
             payment_entry.received_amount = params["paid_amount"]
             payment_entry.reference_no = params.get("reference_no")
-            payment_entry.reference_date = params.get("reference_date")
+            payment_entry.reference_date = reference_date_val
             payment_entry.mode_of_payment = mode_of_payment
             payment_entry.paid_to = company.default_receivable_account
             payment_entry.paid_from = paid_to_account
@@ -4947,10 +4953,11 @@ def create_payment_entry(params=None):
             payment_entry.party_type = "Customer"
             payment_entry.party = params["party"]
             payment_entry.payment_type = "Receive"
+            payment_entry.posting_date = posting_date_val
             payment_entry.paid_amount = params["paid_amount"]
             payment_entry.received_amount = params["paid_amount"]
             payment_entry.reference_no = params.get("reference_no")
-            payment_entry.reference_date = params.get("reference_date")
+            payment_entry.reference_date = reference_date_val
             payment_entry.mode_of_payment = mode_of_payment
             payment_entry.paid_to = paid_to_account
             payment_entry.paid_from = company.default_receivable_account
