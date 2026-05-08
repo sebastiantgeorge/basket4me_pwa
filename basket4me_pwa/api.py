@@ -5145,6 +5145,28 @@ def get_return_invoice_list(name=None, customer=None, status=None, search=None,
         """
         invoice_list = frappe.db.sql(sql, values + [_page_size, _offset], as_dict=True)
 
+        # ── Items array for each return invoice (same shape as get_invoice_list) ──
+        if invoice_list:
+            _si_item_fields = [
+                "item_code", "item_name", "qty", "uom", "stock_uom",
+                "rate", "amount", "price_list_rate",
+                "discount_percentage", "discount_amount",
+                "conversion_factor", "is_free_item",
+                "sales_order", "so_detail",
+            ]
+            if frappe.db.has_column("Sales Invoice Item", "custom_ordered_qty"):
+                _si_item_fields.append("custom_ordered_qty")
+
+            for inv in invoice_list:
+                inv["items"] = frappe.get_all(
+                    "Sales Invoice Item",
+                    filters={"parent": inv["name"]},
+                    fields=_si_item_fields,
+                )
+                # Expose custom_ordered_qty also as 'ordered_qty' for convenience
+                for it in inv["items"]:
+                    it["ordered_qty"] = it.get("custom_ordered_qty")
+
         return response("Return Invoice List", {
             "invoices": invoice_list or [],
             "total_count": total_count,
