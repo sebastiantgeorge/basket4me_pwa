@@ -98,6 +98,12 @@ def create_delivery_note(doc, method):
     if settings.ignore_create_delivery_note:
         return
 
+    # When auto_create_delivery_note is enabled, the explicit code path in
+    # submit_sales_invoice (api.py) creates the DN. Bail here to avoid
+    # creating a duplicate Delivery Note.
+    if getattr(settings, "auto_create_delivery_note", 0):
+        return
+
     try:
         _create_delivery_note_impl(doc, method)
     except Exception as e:
