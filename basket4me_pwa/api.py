@@ -5167,6 +5167,29 @@ def get_return_invoice_list(name=None, customer=None, status=None, search=None,
                 for it in inv["items"]:
                     it["ordered_qty"] = it.get("custom_ordered_qty")
 
+                # customer_address (concatenated primary Address)
+                cust = inv.get("customer")
+                inv["customer_address"] = None
+                if cust:
+                    addr_name = frappe.db.get_value(
+                        "Dynamic Link",
+                        {"link_doctype": "Customer", "link_name": cust, "parenttype": "Address"},
+                        "parent",
+                    )
+                    if addr_name:
+                        addr = frappe.db.get_value(
+                            "Address", addr_name,
+                            ["address_line1", "address_line2", "city", "state", "pincode", "country"],
+                            as_dict=True,
+                        )
+                        if addr:
+                            parts = [addr.address_line1, addr.address_line2, addr.city, addr.state, addr.pincode, addr.country]
+                            inv["customer_address"] = ", ".join([p for p in parts if p])
+
+                # created_by (full_name of owner)
+                owner = frappe.db.get_value("Sales Invoice", inv["name"], "owner")
+                inv["created_by"] = (frappe.db.get_value("User", owner, "full_name") or owner) if owner else None
+
         return response("Return Invoice List", {
             "invoices": invoice_list or [],
             "total_count": total_count,
@@ -5220,7 +5243,9 @@ def update_sales_return(params):
         if docstatus != 0:
             return response(f"Only Draft Sales Returns can be updated. '{name}' is submitted/cancelled", {}, False, 400)
         # Reuse update_sales_invoice — same fields + items handling
-        return update_sales_invoice(params)
+        result = update_sales_invoice(params)
+        _rewrite_response_message_for_return()
+        return result
     except Exception as e:
         frappe.db.rollback()
         frappe.log_error(frappe.get_traceback(), "Update Sales Return Error")
@@ -5243,7 +5268,9 @@ def submit_sales_return(params):
         # Allow negative stock for returns
         frappe.flags.ignore_negative_stock = True
         try:
-            return submit_sales_invoice(params)
+            result = submit_sales_invoice(params)
+            _rewrite_response_message_for_return()
+            return result
         finally:
             frappe.flags.ignore_negative_stock = False
     except Exception as e:
@@ -5266,7 +5293,9 @@ def cancel_sales_return(params):
             return response(f"Sales Return '{name}' not found", {}, False, 404)
         if not frappe.db.get_value("Sales Invoice", name, "is_return"):
             return response(f"'{name}' is not a Sales Return", {}, False, 400)
-        return cancel_sales_invoice(params)
+        result = cancel_sales_invoice(params)
+        _rewrite_response_message_for_return()
+        return result
     except Exception as e:
         frappe.db.rollback()
         frappe.log_error(frappe.get_traceback(), "Cancel Sales Return Error")
@@ -5289,10 +5318,23 @@ def delete_sales_return(params):
             return response(f"'{name}' is not a Sales Return", {}, False, 400)
         if docstatus != 0:
             return response(f"Only Draft Sales Returns can be deleted. '{name}' is submitted/cancelled", {}, False, 400)
-        return delete_sales_invoice(params)
+        result = delete_sales_invoice(params)
+        _rewrite_response_message_for_return()
+        return result
     except Exception as e:
         frappe.log_error(frappe.get_traceback(), "Delete Sales Return Error")
         return response(str(e), {}, False, 417)
+
+
+def _rewrite_response_message_for_return():
+    """Replace 'Sales Invoice' with 'Sales Return' in frappe.local.response['message']
+    after delegating from a sales-return wrapper to a sales-invoice handler."""
+    try:
+        msg = frappe.local.response.get("message")
+        if isinstance(msg, str) and "Sales Invoice" in msg:
+            frappe.local.response["message"] = msg.replace("Sales Invoice", "Sales Return")
+    except Exception:
+        pass
 
 
 @frappe.whitelist(methods="GET")
@@ -10637,7 +10679,8 @@ def get_invoices_for_return(customer=None):
                 "Sales Invoice Item",
                 filters={"parent": inv["name"]},
                 fields=["name", "item_code", "item_name", "qty", "uom", "rate", "amount",
-                        "price_list_rate", "batch_no", "is_free_item"],
+                        "price_list_rate", "discount_percentage", "discount_amount",
+                        "batch_no", "is_free_item"],
             )
 
             enriched_items = []
@@ -10676,6 +10719,8 @@ def get_invoices_for_return(customer=None):
                     "qty": flt(sii.get("qty") or 0),
                     "rate": flt(sii.get("rate") or 0),
                     "amount": flt(sii.get("amount") or 0),
+                    "discount_percentage": flt(sii.get("discount_percentage") or 0),
+                    "discount_amount": flt(sii.get("discount_amount") or 0),
                     "is_free_item": sii.get("is_free_item") or 0,
                     "returned_qty": flt(returned),
                     "returnable_qty": flt(sii.get("qty") or 0) - flt(returned),
