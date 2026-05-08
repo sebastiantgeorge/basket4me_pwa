@@ -1117,6 +1117,25 @@ def get_invoice_list(name=None, customer=None, status=None, search=None,
             search_lower = search.lower()
             invoice_list = [inv for inv in invoice_list if search_lower in (inv.get('name') or '').lower() or search_lower in (inv.get('customer_name') or '').lower()]
 
+        # ── has_receipt: which invoices have at least one Payment Entry referencing them (batch) ──
+        receipt_set = set()
+        if invoice_list:
+            _inv_names_for_receipt = [inv.get('name') for inv in invoice_list if inv.get('name')]
+            if _inv_names_for_receipt:
+                pe_ref_rows = frappe.db.sql(
+                    """
+                    SELECT DISTINCT per.reference_name
+                    FROM `tabPayment Entry Reference` per
+                    JOIN `tabPayment Entry` pe ON pe.name = per.parent
+                    WHERE per.reference_doctype = 'Sales Invoice'
+                      AND per.reference_name IN %s
+                      AND pe.docstatus IN (0, 1)
+                    """,
+                    (_inv_names_for_receipt,),
+                    as_dict=True,
+                )
+                receipt_set = {r["reference_name"] for r in pe_ref_rows}
+
         # ── Compute return_status for each invoice (batch) ──
         if invoice_list:
             inv_names = [inv.get('name') for inv in invoice_list if inv.get('name')]
@@ -1223,6 +1242,9 @@ def get_invoice_list(name=None, customer=None, status=None, search=None,
                 # Expose custom_ordered_qty also as 'ordered_qty' for convenience
                 for it in inv["items"]:
                     it["ordered_qty"] = it.get("custom_ordered_qty")
+
+                # has_receipt: True if at least one PE (Draft or Submitted) references this SI
+                inv["has_receipt"] = inv["name"] in receipt_set
 
                 # UnPaid = boolean flag set by salesperson post-submit (custom_unpaid Check field).
                 # Audit: who toggled it last and when.
@@ -4507,6 +4529,9 @@ def get_receipt_list(name=None, customer=None, status=None, search=None, from_da
                 filters['docstatus'] = 1
             elif status == "Cancelled":
                 filters['docstatus'] = 2
+        else:
+            # Default: include drafts AND submitted (exclude cancelled)
+            filters['docstatus'] = ["in", [0, 1]]
 
         if from_date and to_date:
             filters['posting_date'] = ["between", [from_date, to_date]]
@@ -4514,6 +4539,27 @@ def get_receipt_list(name=None, customer=None, status=None, search=None, from_da
             filters['posting_date'] = [">=", from_date]
         elif to_date:
             filters['posting_date'] = ["<=", to_date]
+
+        # Sales-team isolation: replicate the permission_query_conditions logic
+        # explicitly so we can use ignore_permissions=True (which is required to
+        # surface Draft PEs — ERPNext's role-based DocPerm hides drafts from
+        # non-owners). View-all role and the override_sales_team_in_customer
+        # setting both bypass the filter.
+        if frappe.session.user != "Administrator":
+            view_all_role = frappe.get_value("Basket4Me Settings", None, "view_all_transaction_role")
+            user_roles = frappe.get_roles(frappe.session.user)
+            override_enabled = False
+            try:
+                override_enabled = bool(frappe.db.get_single_value("Basket4Me Settings", "override_sales_team_in_customer"))
+            except Exception:
+                pass
+            if not (view_all_role and view_all_role in user_roles) and not override_enabled:
+                sp = frappe.db.get_value("Sales Person", {"custom_user": frappe.session.user}, "name")
+                if sp:
+                    filters["custom_sales_person"] = sp
+                else:
+                    # No sales_person mapping — return nothing (mirrors hook behavior)
+                    return response("Receipt List", {"receipts": [], "total_count": 0, "page": int(page or 1), "page_size": int(page_size or 20)}, True, 200)
 
         # Search by name or party_name
         or_filters = None
@@ -4527,7 +4573,9 @@ def get_receipt_list(name=None, customer=None, status=None, search=None, from_da
         page_size = int(page_size or 20)
         start = (page - 1) * page_size
 
-        receipt_list = frappe.db.get_list(
+        # ignore_permissions=True so Draft PEs are returned. The
+        # custom_sales_person filter above keeps sales-team isolation intact.
+        receipt_list = frappe.get_all(
             "Payment Entry",
             filters=filters,
             or_filters=or_filters,
