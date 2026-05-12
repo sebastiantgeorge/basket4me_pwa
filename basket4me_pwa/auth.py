@@ -117,24 +117,61 @@ def _get_allow_negative_stock(company_name=None):
 
 
 def generate_keys(user):
+    """Return an api_secret for `user`. Fast path: user already has both
+    api_key and an encrypted api_secret on file — return the existing one
+    without touching User.save() (whose validation + on_update hooks can
+    hang past the upstream proxy timeout, causing 504s on login). Slow
+    path runs only on first login to mint the keys.
+    """
+    # ── Fast path ──
+    existing_api_key = frappe.db.get_value("User", user, "api_key")
+    if existing_api_key:
+        try:
+            from frappe.utils.password import get_decrypted_password
+            existing_secret = get_decrypted_password(
+                "User", user, fieldname="api_secret", raise_exception=False
+            )
+            if existing_secret:
+                return existing_secret
+        except Exception:
+            pass  # fall through to slow path
+
+    # ── Slow path: first-time key generation ──
     user_details = frappe.get_doc("User", user)
     api_secret = frappe.generate_hash(length=15)
-
     api_key = frappe.generate_hash(length=15)
-    user_details.api_key = api_key if not user_details.api_key else user_details.api_key
+    user_details.api_key = user_details.api_key or api_key
     user_details.api_secret = api_secret
 
     # Bypass link validation - some users have references to deleted Workspaces etc.
     user_details.flags.ignore_links = True
     user_details.flags.ignore_validate = True
     user_details.flags.ignore_permissions = True
+    user_details.flags.ignore_mandatory = True
 
     try:
         user_details.save(ignore_permissions=True)
-    except frappe.LinkValidationError:
-        # Fallback: update api_key/api_secret directly via DB if save fails due to link issues
-        frappe.db.set_value("User", user, "api_key", user_details.api_key, update_modified=False)
-        frappe.db.set_value("User", user, "api_secret", frappe.utils.password.encrypt(api_secret), update_modified=False)
+    except Exception:
+        # Fallback: write api_key directly, encrypt api_secret into the
+        # Auth table via Frappe's helper (Password fields aren't stored
+        # in tabUser). Catches LinkValidationError AND any save-hook errors.
+        try:
+            frappe.db.set_value(
+                "User", user, "api_key", user_details.api_key, update_modified=False
+            )
+            try:
+                from frappe.utils.password import set_encrypted_password
+                set_encrypted_password("User", user, api_secret, fieldname="api_secret")
+            except Exception:
+                # Last-resort: direct encrypted column write (older Frappe versions)
+                frappe.db.set_value(
+                    "User", user, "api_secret",
+                    frappe.utils.password.encrypt(api_secret),
+                    update_modified=False,
+                )
+        except Exception:
+            frappe.log_error(frappe.get_traceback(), "generate_keys Fallback Error")
+            raise
 
     frappe.db.commit()
     return api_secret
