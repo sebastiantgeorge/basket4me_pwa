@@ -3,7 +3,19 @@ from frappe.core.doctype.activity_log.activity_log import add_authentication_log
 
 
 @frappe.whitelist(allow_guest=True, methods=["GET", "POST"])
-def user_login(usr, pwd, device_id=None):
+def user_login(usr, pwd, device_id=None, create_session=False):
+    """Login the user.
+
+    Mobile clients authenticate via api_key/api_secret (Authorization: token
+    <key>:<secret>) on subsequent requests, so by default we SKIP
+    LoginManager.post_login() entirely. That call's on_session_creation /
+    on_login hook chain plus clear_active_sessions / boot_cache work has
+    been observed to hang past the upstream proxy's 60s timeout on some
+    sites (504 Gateway Timeout on btlerp).
+
+    Pass create_session=1 if you actually need a server-side cookie session
+    (sid + csrf_token) — it runs the full LoginManager.post_login() flow.
+    """
     if not usr or not pwd:
         frappe.local.response["message"] = {
             "success_key": 0,
@@ -15,7 +27,11 @@ def user_login(usr, pwd, device_id=None):
     # Determine if `usr` is an email or phone/username
     filter_field = "email" if "@" in usr else ("mobile_no" if usr.isdigit() else "username")
 
-    user = frappe.db.get_value("User", {filter_field: usr}, ["name", "username", "email", "mobile_no","api_key"], as_dict=True)
+    user = frappe.db.get_value(
+        "User", {filter_field: usr},
+        ["name", "username", "email", "mobile_no", "api_key", "enabled"],
+        as_dict=True,
+    )
 
     if not user:
         frappe.local.response["message"] = {
@@ -28,48 +44,73 @@ def user_login(usr, pwd, device_id=None):
         )
         return
 
+    if not user.enabled:
+        frappe.local.response["message"] = {"success_key": 0, "message": "User is disabled."}
+        frappe.local.response.http_status_code = 403
+        return
+
+    # ── Fast password verification (no session, no hooks) ──
     try:
-        login_manager = frappe.auth.LoginManager()
-        frappe.form_dict.device = "mobile"
-        login_manager.authenticate(user=user.name, pwd=pwd)
-        login_manager.post_login()
-        # Optionally handle device_id
-
-        # Generate API key/secret
-        api_generate = generate_keys(user.name)
-        # Get CSRF token from session for POS app to use in POST requests
-        csrf_token = ""
-        try:
-            csrf_token = getattr(frappe.session.data, "csrf_token", "") or ""
-            if not csrf_token:
-                csrf_token = frappe.generate_hash()
-                frappe.session.data.csrf_token = csrf_token
-                # Save session via the session object
-                if hasattr(frappe.local, "session_obj") and frappe.local.session_obj:
-                    frappe.local.session_obj.update()
-                frappe.db.commit()
-        except Exception:
-            csrf_token = csrf_token or ""
-
-        frappe.response["message"] = {
-            "success_key": 1,
-            "message": "Authentication success",
-            "sid": frappe.session.sid,
-            "csrf_token": csrf_token,
-            "api_key": user.api_key,
-            "api_secret": api_generate,
-            "username": user.username,
-            "email": user.email,
-            "mobile_no": user.mobile_no,
-        }
-    except frappe.exceptions.AuthenticationError:
+        from frappe.utils.password import check_password
+        check_password(user.name, pwd)
+    except frappe.AuthenticationError:
         frappe.clear_messages()
-        frappe.local.response["message"] = {
-            "success_key": 0,
-            "message": "Incorrect password!",
-        }
+        frappe.local.response["message"] = {"success_key": 0, "message": "Incorrect password!"}
         frappe.local.response.http_status_code = 401
         return
+    except Exception as e:
+        frappe.log_error(frappe.get_traceback(), "user_login check_password error")
+        frappe.local.response["message"] = {"success_key": 0, "message": str(e)}
+        frappe.local.response.http_status_code = 500
+        return
+
+    # ── Generate / fetch API keys (fast path for existing users) ──
+    try:
+        api_generate = generate_keys(user.name)
+    except Exception as e:
+        frappe.log_error(frappe.get_traceback(), "user_login generate_keys error")
+        frappe.local.response["message"] = {"success_key": 0, "message": f"Key generation failed: {e}"}
+        frappe.local.response.http_status_code = 500
+        return
+
+    # Re-fetch api_key (generate_keys may have minted one for first-time users)
+    api_key_val = user.api_key or frappe.db.get_value("User", user.name, "api_key") or ""
+
+    # ── Optional session creation (off by default to avoid 504 hangs) ──
+    sid = ""
+    csrf_token = ""
+    if create_session and str(create_session).lower() not in ("0", "false", "no"):
+        try:
+            login_manager = frappe.auth.LoginManager()
+            frappe.form_dict.device = "mobile"
+            login_manager.authenticate(user=user.name, pwd=pwd)
+            login_manager.post_login()
+            sid = frappe.session.sid
+            try:
+                csrf_token = getattr(frappe.session.data, "csrf_token", "") or ""
+                if not csrf_token:
+                    csrf_token = frappe.generate_hash()
+                    frappe.session.data.csrf_token = csrf_token
+                    if hasattr(frappe.local, "session_obj") and frappe.local.session_obj:
+                        frappe.local.session_obj.update()
+                    frappe.db.commit()
+            except Exception:
+                csrf_token = csrf_token or ""
+        except Exception:
+            # Session creation is best-effort. Login already succeeded above.
+            frappe.log_error(frappe.get_traceback(), "user_login session creation skipped")
+
+    frappe.response["message"] = {
+        "success_key": 1,
+        "message": "Authentication success",
+        "sid": sid,
+        "csrf_token": csrf_token,
+        "api_key": api_key_val,
+        "api_secret": api_generate,
+        "username": user.username,
+        "email": user.email,
+        "mobile_no": user.mobile_no,
+    }
 
 def set_device_to_mobile():
     # Ensure session exists before modifying
