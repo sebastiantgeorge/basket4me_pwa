@@ -557,6 +557,51 @@ def get_basket4me_settings():
         frappe.flags.ignore_permissions = _orig
     return
 
+
+@frappe.whitelist()
+def get_modes_of_payment_for_company(doctype, txt, searchfield, start, page_len, filters):
+    """Link-field query: return enabled Modes of Payment that have an
+    account row configured for the requested company.
+
+    `Mode of Payment` doctype itself has no `company` column — the per-company
+    config lives in the `Mode of Payment Account` child table. The Basket4Me
+    Settings UI was previously filtering MOP by `company=<row.company>`
+    directly, which crashed with "permission to access field: Mode of
+    Payment.company" because that field does not exist. This method joins
+    MOP with its accounts child so the filter works correctly.
+    """
+    company = (filters or {}).get("company") or ""
+    txt = (txt or "").strip()
+    start = int(start or 0)
+    page_len = int(page_len or 20)
+
+    conditions = ["mop.enabled = 1"]
+    values = []
+
+    if txt:
+        conditions.append(f"(mop.name LIKE %s OR mop.{searchfield or 'name'} LIKE %s)")
+        values.extend([f"%{txt}%", f"%{txt}%"])
+
+    if company:
+        # MOP must have at least one account row for this company
+        conditions.append("""mop.name IN (
+            SELECT parent FROM `tabMode of Payment Account`
+            WHERE company = %s
+        )""")
+        values.append(company)
+
+    where = " AND ".join(conditions)
+    sql = f"""
+        SELECT mop.name, mop.type
+        FROM `tabMode of Payment` mop
+        WHERE {where}
+        ORDER BY mop.name ASC
+        LIMIT %s OFFSET %s
+    """
+    values.extend([page_len, start])
+    return frappe.db.sql(sql, values)
+
+
 @frappe.whitelist(methods="GET")
 def get_sales_metrics(from_date=None, to_date=None, sales_person_filter=None):
     """
