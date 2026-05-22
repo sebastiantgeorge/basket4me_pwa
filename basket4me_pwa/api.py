@@ -641,6 +641,35 @@ def assert_company_allowed(company, user=None):
         )
 
 
+def get_company_filter_for_reads(requested_company=None, user=None):
+    """Return (sql_clause, values_list) to scope a read query by the user's
+    allowed companies. Pass to caller as:
+        clause, vals = get_company_filter_for_reads(params.get('company'))
+        if clause: conditions.append(clause); values.extend(vals)
+
+    Behavior:
+      - If user is Administrator → no filter (("", []))
+      - If `requested_company` is provided and allowed → `<table>.company = %s`
+      - Else if user has allowed companies → `<table>.company IN (%s, ...)`
+      - Else → no filter
+    Caller is responsible for prefixing the table alias (`si.company`,
+    `so.company`, etc.) — we return just the placeholder side.
+
+    For the table-aware form, see _company_in_clause in the permission/ module.
+    """
+    user = user or frappe.session.user
+    if user == "Administrator":
+        return ("", [])
+    if requested_company:
+        assert_company_allowed(requested_company, user)
+        return ("company = %s", [requested_company])
+    allowed = get_user_companies(user)
+    if not allowed:
+        return ("", [])
+    placeholders = ",".join(["%s"] * len(allowed))
+    return (f"company IN ({placeholders})", list(allowed))
+
+
 @frappe.whitelist(methods="GET")
 def get_user_companies_api(user_id=None):
     """List companies the user's sales_person is configured for, plus the
@@ -1124,7 +1153,7 @@ def get_customer_invoice_aging():
 @frappe.whitelist(methods="GET")
 def get_invoice_list(name=None, customer=None, status=None, search=None,
                      from_date=None, to_date=None, route=None,
-                     page_number=1, page_size=20):
+                     page_number=1, page_size=20, company=None):
     """
     List Sales Invoices with filters and pagination.
 
@@ -1135,6 +1164,7 @@ def get_invoice_list(name=None, customer=None, status=None, search=None,
         search: Search by name or customer_name
         from_date / to_date: Date range filter on posting_date
         route: Filter by Customer Route
+        company: Optional — scope to a specific company (must be in user's allowed set)
         page_number / page_size: Pagination
     """
     try:
@@ -1143,8 +1173,18 @@ def get_invoice_list(name=None, customer=None, status=None, search=None,
 
         sales_person = frappe.db.get_value("Sales Person", {"custom_user": frappe.session.user}, "name")
 
+        # Multi-company: explicit filter (validated) or implicit user-allowed set.
+        if company:
+            assert_company_allowed(company)
+        _allowed_companies = get_user_companies(frappe.session.user) if frappe.session.user != "Administrator" else []
+
         filters = {"is_return": 0}
-        fields = ['name', 'customer', 'customer_name', 'posting_date', 'grand_total', 'outstanding_amount', 'status', 'docstatus', 'creation']
+        fields = ['name', 'customer', 'customer_name', 'posting_date', 'grand_total', 'outstanding_amount', 'status', 'docstatus', 'creation', 'company']
+
+        if company:
+            filters['company'] = company
+        elif _allowed_companies:
+            filters['company'] = ["in", _allowed_companies]
 
         if name:
             filters['name'] = name
@@ -1177,6 +1217,15 @@ def get_invoice_list(name=None, customer=None, status=None, search=None,
         if override_enabled:
             conditions = ["si.is_return = 0"]
             values = []
+
+            # Multi-company filter for raw-SQL branch
+            if company:
+                conditions.append("si.company = %s")
+                values.append(company)
+            elif _allowed_companies:
+                _ph = ",".join(["%s"] * len(_allowed_companies))
+                conditions.append(f"si.company IN ({_ph})")
+                values.extend(_allowed_companies)
 
             if name:
                 conditions.append("si.name = %s")
@@ -1796,7 +1845,7 @@ def update_invoice_unpaid_status(params):
 
 
 @frappe.whitelist(methods="GET")
-def last_invoice_cust_receipt(user_id=None, date=None):
+def last_invoice_cust_receipt(user_id=None, date=None, company=None):
     """Return UnPaid status of the most recent Sales Invoice created by a
     given user on a given date, plus the last receipt (Payment Entry) for
     that invoice's customer on the same date.
@@ -1804,13 +1853,14 @@ def last_invoice_cust_receipt(user_id=None, date=None):
     Query params:
         user_id: defaults to frappe.session.user
         date:    defaults to today (posting_date used for both SI and PE)
+        company: optional — scope to a specific company
 
     Response shape:
         {
             "user_id": "<user>",
             "date": "YYYY-MM-DD",
             "invoice": {"name", "customer", "customer_name", "posting_date",
-                        "grand_total", "outstanding_amount"} | null,
+                        "grand_total", "outstanding_amount", "company"} | null,
             "UnPaid": 0 | 1,                         # null if no invoice
             "receipt": {"receipt_no", "date", "value"} | null
         }
@@ -1819,29 +1869,46 @@ def last_invoice_cust_receipt(user_id=None, date=None):
         user_id = user_id or frappe.session.user
         date = date or nowdate()
 
+        # Multi-company: validate / scope
+        if company:
+            assert_company_allowed(company, user_id)
+        _allowed_companies = get_user_companies(user_id) if user_id != "Administrator" else []
+
+        si_company_filter = ""
+        si_company_values = []
+        if company:
+            si_company_filter = " AND company = %s "
+            si_company_values = [company]
+        elif _allowed_companies:
+            _ph = ",".join(["%s"] * len(_allowed_companies))
+            si_company_filter = f" AND company IN ({_ph}) "
+            si_company_values = list(_allowed_companies)
+
         # 1) Last SI created by user on date (submitted, non-return)
         si_row = frappe.db.sql(
-            """
+            f"""
             SELECT name, customer, customer_name, posting_date,
-                   grand_total, outstanding_amount,
+                   grand_total, outstanding_amount, company,
                    COALESCE(custom_unpaid, 0) AS custom_unpaid
             FROM `tabSales Invoice`
             WHERE owner = %s AND posting_date = %s
               AND docstatus = 1 AND is_return = 0
+              {si_company_filter}
             ORDER BY creation DESC
             LIMIT 1
             """ if frappe.db.has_column("Sales Invoice", "custom_unpaid") else
-            """
+            f"""
             SELECT name, customer, customer_name, posting_date,
-                   grand_total, outstanding_amount,
+                   grand_total, outstanding_amount, company,
                    0 AS custom_unpaid
             FROM `tabSales Invoice`
             WHERE owner = %s AND posting_date = %s
               AND docstatus = 1 AND is_return = 0
+              {si_company_filter}
             ORDER BY creation DESC
             LIMIT 1
             """,
-            (user_id, date),
+            [user_id, date] + si_company_values,
             as_dict=True,
         )
 
@@ -1856,9 +1923,11 @@ def last_invoice_cust_receipt(user_id=None, date=None):
 
         si = si_row[0]
         customer = si["customer"]
+        si_company = si.get("company")
         unpaid = int(si.get("custom_unpaid") or 0)
 
-        # 2) Last receipt (Payment Entry, Receive) for that customer on the same date
+        # 2) Last receipt (Payment Entry, Receive) for that customer on the same date,
+        # scoped to the same company as the invoice for consistency.
         pe_row = frappe.db.sql(
             """
             SELECT name, posting_date, paid_amount
@@ -1866,10 +1935,11 @@ def last_invoice_cust_receipt(user_id=None, date=None):
             WHERE party_type = 'Customer' AND party = %s
               AND payment_type = 'Receive' AND docstatus = 1
               AND posting_date = %s
+              AND (company = %s OR %s IS NULL)
             ORDER BY creation DESC
             LIMIT 1
             """,
-            (customer, date),
+            (customer, date, si_company, si_company),
             as_dict=True,
         )
 
@@ -1892,6 +1962,7 @@ def last_invoice_cust_receipt(user_id=None, date=None):
                 "posting_date": str(si["posting_date"]) if si.get("posting_date") else None,
                 "grand_total": flt(si.get("grand_total") or 0),
                 "outstanding_amount": flt(si.get("outstanding_amount") or 0),
+                "company": si_company,
             },
             "UnPaid": unpaid,
             "receipt": receipt,
@@ -4664,7 +4735,7 @@ def create_sales_invoice_return(params):
 # Payment Entry Api
 
 @frappe.whitelist(methods="GET")
-def get_receipt_list(name=None, customer=None, status=None, search=None, from_date=None, to_date=None, payment_type=None, page=1, page_size=20):
+def get_receipt_list(name=None, customer=None, status=None, search=None, from_date=None, to_date=None, payment_type=None, page=1, page_size=20, company=None):
     """
     Get list of Payment Entries (Receipts/Payments).
 
@@ -4675,14 +4746,25 @@ def get_receipt_list(name=None, customer=None, status=None, search=None, from_da
         search: Search by name or party_name
         from_date / to_date: Date range filter
         payment_type: "Receive" (Receipt) or "Pay" (Payment) or None (all)
+        company: optional — scope to a specific company (must be in user's allowed set)
         page / page_size: Pagination
     """
     try:
+        # Multi-company scoping
+        if company:
+            assert_company_allowed(company)
+        _allowed_companies = get_user_companies(frappe.session.user) if frappe.session.user != "Administrator" else []
+
         filters = {"party_type": "Customer"}
+        if company:
+            filters['company'] = company
+        elif _allowed_companies:
+            filters['company'] = ["in", _allowed_companies]
+
         fields = [
             'name', 'party', 'party_name', 'posting_date', 'paid_amount',
             'mode_of_payment', 'payment_type', 'docstatus', 'status', 'creation',
-            'reference_no', 'reference_date',
+            'reference_no', 'reference_date', 'company',
         ]
 
         if name:
@@ -5242,24 +5324,38 @@ def create_payment_entry(params=None):
 @frappe.whitelist(methods="GET")
 def get_return_invoice_list(name=None, customer=None, status=None, search=None,
                             from_date=None, to_date=None, route=None,
-                            page_number=1, page_size=20):
+                            page_number=1, page_size=20, company=None):
     """List Sales Returns (is_return=1) with filters and pagination.
 
     Query params:
         name, customer, status, search: same as get_invoice_list
         from_date / to_date: posting_date range
         route: customer route (custom_route)
+        company: optional — scope to a specific company (must be in user's allowed set)
         page_number / page_size: pagination
     """
     try:
         _page_size = int(page_size or 20)
         _offset = (int(page_number or 1) - 1) * _page_size
 
+        # Multi-company scoping
+        if company:
+            assert_company_allowed(company)
+        _allowed_companies = get_user_companies(frappe.session.user) if frappe.session.user != "Administrator" else []
+
         fields = ['name', 'customer', 'customer_name', 'posting_date', 'grand_total',
-                  'outstanding_amount', 'status', 'docstatus', 'return_against', 'creation']
+                  'outstanding_amount', 'status', 'docstatus', 'return_against', 'creation', 'company']
 
         conditions = ["si.is_return = 1"]
         values = []
+
+        if company:
+            conditions.append("si.company = %s")
+            values.append(company)
+        elif _allowed_companies:
+            _ph = ",".join(["%s"] * len(_allowed_companies))
+            conditions.append(f"si.company IN ({_ph})")
+            values.extend(_allowed_companies)
 
         if name:
             conditions.append("si.name = %s")
@@ -8698,7 +8794,7 @@ def delete_sales_order(params):
 
 
 @frappe.whitelist(methods="GET")
-def get_sales_order_list(name=None, customer=None, status=None, search=None, from_date=None, to_date=None, route=None, page_number=1, page_size=20, limit_start=None, limit_page_length=None):
+def get_sales_order_list(name=None, customer=None, status=None, search=None, from_date=None, to_date=None, route=None, page_number=1, page_size=20, limit_start=None, limit_page_length=None, company=None):
     """
     List Sales Orders with filters.
 
@@ -8709,6 +8805,7 @@ def get_sales_order_list(name=None, customer=None, status=None, search=None, fro
         search: Search by SO name or customer name
         from_date / to_date: Date range filter on transaction_date
         route: Filter by Customer Route
+        company: optional — scope to a specific company (must be in user's allowed set)
         page_number / page_size: Pagination
     """
     try:
@@ -8721,7 +8818,16 @@ def get_sales_order_list(name=None, customer=None, status=None, search=None, fro
 
         sales_person = frappe.db.get_value("Sales Person", {"custom_user": frappe.session.user}, "name")
 
+        # Multi-company scoping
+        if company:
+            assert_company_allowed(company)
+        _allowed_companies = get_user_companies(frappe.session.user) if frappe.session.user != "Administrator" else []
+
         filters = {}
+        if company:
+            filters["company"] = company
+        elif _allowed_companies:
+            filters["company"] = ["in", _allowed_companies]
         if name:
             filters["name"] = name
         if customer:
@@ -9150,13 +9256,14 @@ def convert_so_to_si(params):
 # ==================== DASHBOARD APIs ====================
 
 @frappe.whitelist(methods="GET")
-def get_dashboard_summary(period="daily", from_date=None, to_date=None):
+def get_dashboard_summary(period="daily", from_date=None, to_date=None, company=None):
     """
     Dashboard summary for Van Sales workflow.
 
     Args:
         period: "daily" | "weekly" | "monthly" (ignored if from_date/to_date provided)
         from_date / to_date: Custom date range
+        company: optional — scope to a specific company (must be in user's allowed set)
     Returns:
         Total Order Value, Total Customers, Total Collection, Total Invoices,
         Total Returns, Total Visited Customers
@@ -9166,6 +9273,25 @@ def get_dashboard_summary(period="daily", from_date=None, to_date=None):
         sales_person = frappe.db.get_value("Sales Person", {"custom_user": frappe.session.user}, "name")
         if not sales_person:
             return response("No Sales Person linked to the logged-in user", {}, False, 400)
+
+        # Multi-company scoping: build a parameterized clause + values once
+        if company:
+            assert_company_allowed(company)
+        _allowed_companies = get_user_companies(frappe.session.user) if frappe.session.user != "Administrator" else []
+        if company:
+            _company_so = " AND so.company = %s "
+            _company_si = " AND si.company = %s "
+            _company_pe = " AND pe.company = %s "
+            _company_values = [company]
+        elif _allowed_companies:
+            _ph = ",".join(["%s"] * len(_allowed_companies))
+            _company_so = f" AND so.company IN ({_ph}) "
+            _company_si = f" AND si.company IN ({_ph}) "
+            _company_pe = f" AND pe.company IN ({_ph}) "
+            _company_values = list(_allowed_companies)
+        else:
+            _company_so = _company_si = _company_pe = ""
+            _company_values = []
 
         if from_date and to_date:
             start, end = from_date, to_date
@@ -9193,8 +9319,9 @@ def get_dashboard_summary(period="daily", from_date=None, to_date=None):
             {so_join} `tabSales Team` st ON so.name = st.parent
             WHERE so.docstatus = 1 AND {so_cond}
             AND so.transaction_date BETWEEN %s AND %s
+            {_company_so}
         """
-        so_row = frappe.db.sql(so_sql, (sales_person, start, end), as_dict=True)[0]
+        so_row = frappe.db.sql(so_sql, [sales_person, start, end] + _company_values, as_dict=True)[0]
 
         # Sales Invoice totals (non-return)
         si_join = "LEFT JOIN" if override else "JOIN"
@@ -9207,8 +9334,9 @@ def get_dashboard_summary(period="daily", from_date=None, to_date=None):
             {si_join} `tabSales Team` st ON si.name = st.parent
             WHERE si.docstatus = 1 AND si.is_return = 0 AND {si_cond}
             AND si.posting_date BETWEEN %s AND %s
+            {_company_si}
         """
-        si_row = frappe.db.sql(si_sql, (sales_person, start, end), as_dict=True)[0]
+        si_row = frappe.db.sql(si_sql, [sales_person, start, end] + _company_values, as_dict=True)[0]
 
         # Return totals
         ret_sql = f"""
@@ -9219,11 +9347,12 @@ def get_dashboard_summary(period="daily", from_date=None, to_date=None):
             {si_join} `tabSales Team` st ON si.name = st.parent
             WHERE si.docstatus = 1 AND si.is_return = 1 AND {si_cond}
             AND si.posting_date BETWEEN %s AND %s
+            {_company_si}
         """
-        ret_row = frappe.db.sql(ret_sql, (sales_person, start, end), as_dict=True)[0]
+        ret_row = frappe.db.sql(ret_sql, [sales_person, start, end] + _company_values, as_dict=True)[0]
 
         # Collection totals
-        coll_sql = """
+        coll_sql = f"""
             SELECT COALESCE(SUM(pe.paid_amount), 0) as total_value,
                    COUNT(DISTINCT pe.name) as total_count,
                    COUNT(DISTINCT pe.party) as total_customers
@@ -9231,8 +9360,9 @@ def get_dashboard_summary(period="daily", from_date=None, to_date=None):
             WHERE pe.docstatus = 1 AND pe.payment_type = 'Receive'
             AND pe.posting_date BETWEEN %s AND %s
             AND pe.custom_sales_person = %s
+            {_company_pe}
         """
-        coll_row = frappe.db.sql(coll_sql, (start, end, sales_person), as_dict=True)[0]
+        coll_row = frappe.db.sql(coll_sql, [start, end, sales_person] + _company_values, as_dict=True)[0]
 
         # Visited customers — use Comment-based visit log (matches mark_customer_visit / get_customer_visits)
         visited_customers = 0
@@ -10239,10 +10369,23 @@ def delete_delivery_note(params):
 
 @frappe.whitelist(methods="GET")
 def get_delivery_note_list(name=None, customer=None, status=None, search=None,
-                           from_date=None, to_date=None, limit_start=0, limit_page_length=20):
-    """List Delivery Notes with filters."""
+                           from_date=None, to_date=None, limit_start=0, limit_page_length=20,
+                           company=None):
+    """List Delivery Notes with filters.
+
+    company: optional — scope to a specific company (must be in user's allowed set)
+    """
     try:
+        # Multi-company scoping
+        if company:
+            assert_company_allowed(company)
+        _allowed_companies = get_user_companies(frappe.session.user) if frappe.session.user != "Administrator" else []
+
         filters = {}
+        if company:
+            filters["company"] = company
+        elif _allowed_companies:
+            filters["company"] = ["in", _allowed_companies]
         if name:
             filters["name"] = name
         if customer:
