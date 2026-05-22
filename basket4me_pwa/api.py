@@ -3103,15 +3103,20 @@ def create_sales_invoice(params):
         sales_person = frappe.db.get_value("Sales Person", {"custom_user": frappe.session.user}, "name")
         customer = params.get("customer")
 
-        settings = get_basket4me_settings()
-        sales_person_details = None
+        # Multi-company: resolve company from params / header / single-allowed.
+        company = resolve_company(params)
+        if company:
+            assert_company_allowed(company)
 
-        for detail in settings.sales_person_details:
-            if detail.sales_person == sales_person:
-                sales_person_details = detail
-
+        sales_person_details = get_sales_person_details(sales_person, company)
         if not sales_person_details:
-            return response(f"No Basket4Me Settings found for sales person {sales_person}", {}, False, 400)
+            if not company and len(get_user_companies(frappe.session.user)) > 1:
+                return response(
+                    "company is required (user is configured for multiple companies)",
+                    {"allowed_companies": get_user_companies(frappe.session.user)},
+                    False, 400,
+                )
+            return response(f"No Basket4Me Settings row for sales person {sales_person} / company {company or '(any)'}", {}, False, 400)
 
         # User-selected price list overrides auto-detection
         user_price_list = params.get("price_list") or params.get("selling_price_list")
@@ -3385,14 +3390,13 @@ def update_sales_invoice(params):
         sales_person = frappe.db.get_value("Sales Person", {"custom_user": frappe.session.user}, "name")
         customer = params.get("customer", sales_invoice.customer)
 
-        settings = get_basket4me_settings()
-        sales_person_details = None
-        for detail in settings.sales_person_details:
-            if detail.sales_person == sales_person:
-                sales_person_details = detail
-
+        # Multi-company: derive company from the existing doc (don't allow changing it on update).
+        company = sales_invoice.company or resolve_company(params)
+        if company:
+            assert_company_allowed(company)
+        sales_person_details = get_sales_person_details(sales_person, company)
         if not sales_person_details:
-            return response(f"No Basket4Me Settings found for sales person {sales_person}", {}, False, 400)
+            return response(f"No Basket4Me Settings row for sales person {sales_person} / company {company or '(any)'}", {}, False, 400)
 
         effective_price_list = get_effective_price_list(customer=customer, sales_person=sales_person)
 
@@ -4319,15 +4323,29 @@ def create_sales_invoice_return(params):
         sales_person = frappe.db.get_value("Sales Person", {"custom_user": frappe.session.user}, "name")
         customer = params.get("customer")
 
-        settings = get_basket4me_settings()
-        sales_person_details = None
-
-        for detail in settings.sales_person_details:
-            if detail.sales_person == sales_person:
-                sales_person_details = detail
-
+        # Multi-company: derive from return_against (must match) else params.
+        return_against_for_company = params.get("return_against")
+        if return_against_for_company:
+            orig_company = frappe.db.get_value("Sales Invoice", return_against_for_company, "company")
+            company = orig_company
+            if params.get("company") and params["company"] != orig_company:
+                return response(
+                    f"company '{params['company']}' does not match return_against SI company '{orig_company}'",
+                    {}, False, 400,
+                )
+        else:
+            company = resolve_company(params)
+        if company:
+            assert_company_allowed(company)
+        sales_person_details = get_sales_person_details(sales_person, company)
         if not sales_person_details:
-            return response(f"No Basket4Me Settings found for sales person {sales_person}", {}, False, 400)
+            if not company and len(get_user_companies(frappe.session.user)) > 1:
+                return response(
+                    "company is required (user is configured for multiple companies)",
+                    {"allowed_companies": get_user_companies(frappe.session.user)},
+                    False, 400,
+                )
+            return response(f"No Basket4Me Settings row for sales person {sales_person} / company {company or '(any)'}", {}, False, 400)
 
         # Get effective price list
         effective_price_list = get_effective_price_list(customer=customer, sales_person=sales_person)
@@ -4994,19 +5012,23 @@ def create_payment_entry(params=None):
         if payment_based_on_sales_person:
             # Sales person based logic - use current user's sales person
             sales_person = frappe.db.get_value("Sales Person", {"custom_user": frappe.session.user}, "name")
-            
+
             if not sales_person:
                 return response("No Sales Person linked to the logged-in user", {}, False, 400)
-            
-            # Find sales person details for current user
-            sales_person_details = None
-            for detail in settings.sales_person_details:
-                if detail.sales_person == sales_person:
-                    sales_person_details = detail
-                    break
-            
+
+            # Multi-company: resolve and find matching settings row
+            company_name = resolve_company(params)
+            if company_name:
+                assert_company_allowed(company_name)
+            sales_person_details = get_sales_person_details(sales_person, company_name)
             if not sales_person_details:
-                return response(f"No Basket4Me Settings found for sales person {sales_person}", {}, False, 400)
+                if not company_name and len(get_user_companies(frappe.session.user)) > 1:
+                    return response(
+                        "company is required (user is configured for multiple companies)",
+                        {"allowed_companies": get_user_companies(frappe.session.user)},
+                        False, 400,
+                    )
+                return response(f"No Basket4Me Settings row for sales person {sales_person} / company {company_name or '(any)'}", {}, False, 400)
 
             company = frappe.get_doc('Company', {"name": sales_person_details.company})
 
@@ -5042,15 +5064,13 @@ def create_payment_entry(params=None):
             # Mode of payment details only (with sales person fallback)
             sales_person = frappe.db.get_value("Sales Person", {"custom_user": frappe.session.user}, "name")
 
-            # Still look up sales person details for fallback mode
-            sales_person_details = None
-            if sales_person:
-                for detail in settings.sales_person_details:
-                    if detail.sales_person == sales_person:
-                        sales_person_details = detail
-                        break
+            # Multi-company: resolve and find matching settings row
+            company_name = resolve_company(params)
+            if company_name:
+                assert_company_allowed(company_name)
+            sales_person_details = get_sales_person_details(sales_person, company_name) if sales_person else None
 
-            company = frappe.get_doc('Company', {"name": sales_person_details.company if sales_person_details else None})
+            company = frappe.get_doc('Company', {"name": sales_person_details.company if sales_person_details else (company_name or None)})
 
             # Build valid modes: universal modes + sales person mode
             valid_modes = []
@@ -5074,12 +5094,24 @@ def create_payment_entry(params=None):
                 else:
                     return response("No mode of payment configured. Please pass mode_of_payment parameter.", {}, False, 400)
         
-        # Get account for selected mode of payment
+        # Get account for selected mode of payment — pick the accounts[] row
+        # matching the resolved company (NOT just accounts[0]; that breaks
+        # multi-company setups where the same MOP has per-company accounts).
         mode_doc = frappe.get_doc("Mode of Payment", mode_of_payment)
         if not mode_doc.accounts:
             return response(f"No account configured for mode of payment '{mode_of_payment}'", {}, False, 400)
-        
-        paid_to_account = mode_doc.accounts[0].default_account
+
+        target_company = sales_person_details.company if sales_person_details else (company_name if 'company_name' in dir() else None)
+        _mop_account_row = None
+        if target_company:
+            for _a in mode_doc.accounts:
+                if _a.company == target_company:
+                    _mop_account_row = _a
+                    break
+        if not _mop_account_row:
+            _mop_account_row = mode_doc.accounts[0]
+
+        paid_to_account = _mop_account_row.default_account
 
         # Normalize invoice field names to support multiple formats
         normalized_invoices = []
@@ -8174,14 +8206,19 @@ def create_sales_order(params):
         sales_person = frappe.db.get_value("Sales Person", {"custom_user": frappe.session.user}, "name")
         customer = params.get("customer")
 
-        settings = get_basket4me_settings()
-        sales_person_details = None
-        for detail in settings.sales_person_details:
-            if detail.sales_person == sales_person:
-                sales_person_details = detail
-
+        # Multi-company resolution
+        company = resolve_company(params)
+        if company:
+            assert_company_allowed(company)
+        sales_person_details = get_sales_person_details(sales_person, company)
         if not sales_person_details:
-            return response(f"No Basket4Me Settings found for sales person {sales_person}", {}, False, 400)
+            if not company and len(get_user_companies(frappe.session.user)) > 1:
+                return response(
+                    "company is required (user is configured for multiple companies)",
+                    {"allowed_companies": get_user_companies(frappe.session.user)},
+                    False, 400,
+                )
+            return response(f"No Basket4Me Settings row for sales person {sales_person} / company {company or '(any)'}", {}, False, 400)
 
         # User-selected price list overrides auto-detection
         user_price_list = params.get("price_list") or params.get("selling_price_list")
@@ -8412,14 +8449,14 @@ def update_sales_order(params):
             return response("Can only update Sales Order in Draft state", {}, False, 400)
 
         sales_person = frappe.db.get_value("Sales Person", {"custom_user": frappe.session.user}, "name")
-        settings = get_basket4me_settings()
-        sales_person_details = None
-        for detail in settings.sales_person_details:
-            if detail.sales_person == sales_person:
-                sales_person_details = detail
 
+        # Multi-company: derive from existing SO (don't allow change on update)
+        company = so.company or resolve_company(params)
+        if company:
+            assert_company_allowed(company)
+        sales_person_details = get_sales_person_details(sales_person, company)
         if not sales_person_details:
-            return response(f"No Basket4Me Settings found for sales person {sales_person}", {}, False, 400)
+            return response(f"No Basket4Me Settings row for sales person {sales_person} / company {company or '(any)'}", {}, False, 400)
 
         customer = params.get("customer") or so.customer
         effective_price_list = get_effective_price_list(customer=customer, sales_person=sales_person)
@@ -8984,16 +9021,8 @@ def convert_so_to_si(params):
             return response("sales_orders list is required", {}, False, 400)
 
         sales_person = frappe.db.get_value("Sales Person", {"custom_user": frappe.session.user}, "name")
-        settings = get_basket4me_settings()
-        sales_person_details = None
-        for detail in settings.sales_person_details:
-            if detail.sales_person == sales_person:
-                sales_person_details = detail
 
-        if not sales_person_details:
-            return response(f"No Basket4Me Settings found for sales person {sales_person}", {}, False, 400)
-
-        # Validate all SOs exist and belong to same customer
+        # Validate all SOs exist and belong to same customer + same company
         first_so = frappe.get_doc("Sales Order", sales_orders[0])
         for so_name in sales_orders:
             if not frappe.db.exists("Sales Order", so_name):
@@ -9001,6 +9030,16 @@ def convert_so_to_si(params):
             so = frappe.get_doc("Sales Order", so_name)
             if so.customer != first_so.customer:
                 return response(f"All Sales Orders must belong to same customer. {so_name} has different customer.", {}, False, 400)
+            if so.company != first_so.company:
+                return response(f"All Sales Orders must belong to same company. {so_name} has '{so.company}', first has '{first_so.company}'.", {}, False, 400)
+
+        # Multi-company: derive from the first SO (all SOs validated same above)
+        company = first_so.company
+        if company:
+            assert_company_allowed(company)
+        sales_person_details = get_sales_person_details(sales_person, company)
+        if not sales_person_details:
+            return response(f"No Basket4Me Settings row for sales person {sales_person} / company {company or '(any)'}", {}, False, 400)
             if so.status == "Completed" or so.per_billed >= 100:
                 return response(f"Sales Order {so_name} is already fully billed", {}, False, 400)
             if so.per_billed > 0:
@@ -10478,25 +10517,28 @@ def create_dn_from_so(params):
                 "Manual Delivery Note creation is disabled. Delivery Notes are auto-created on Sales Invoice submission (Basket4Me Settings > Auto Create Delivery Note).",
                 {}, False, 400,
             )
-        sp_detail = None
-        for d in settings.sales_person_details:
-            if d.sales_person == sales_person:
-                sp_detail = d
-                break
-        if not sp_detail:
-            return response(f"No settings for sales person {sales_person}", {}, False, 400)
 
         first_so = frappe.get_doc("Sales Order", sales_orders[0])
 
-        # Validate & submit drafts
+        # Validate & submit drafts (also check same-company)
         for so_name in sales_orders:
             so = frappe.get_doc("Sales Order", so_name)
             if so.customer != first_so.customer:
                 return response(f"All SOs must belong to same customer. {so_name} differs.", {}, False, 400)
+            if so.company != first_so.company:
+                return response(f"All SOs must belong to same company. {so_name} has '{so.company}', first has '{first_so.company}'.", {}, False, 400)
             if so.per_delivered >= 100:
                 return response(f"SO {so_name} is already fully delivered", {}, False, 400)
             if so.docstatus == 0:
                 so.submit()
+
+        # Multi-company: derive from first SO
+        company = first_so.company
+        if company:
+            assert_company_allowed(company)
+        sp_detail = get_sales_person_details(sales_person, company)
+        if not sp_detail:
+            return response(f"No Basket4Me Settings row for sales person {sales_person} / company {company or '(any)'}", {}, False, 400)
 
         dn = frappe.new_doc("Delivery Note")
         dn.customer = first_so.customer
