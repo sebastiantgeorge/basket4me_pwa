@@ -6,6 +6,20 @@ def get_sales_person(user):
     return sales_person
 
 
+def _get_user_companies(user):
+    """Local import to avoid circular dep at module load."""
+    try:
+        from basket4me_pwa.api import get_user_companies
+        return get_user_companies(user) or []
+    except Exception:
+        return []
+
+
+def _company_in_clause(companies):
+    """SQL fragment '(\'A\',\'B\')' with escaped quotes."""
+    return "(" + ",".join("'" + c.replace("'", "''") + "'" for c in companies) + ")"
+
+
 @frappe.whitelist()
 def get_permission_query_conditions_for_invoice(user=None):
     view_all_role = frappe.get_value("Basket4Me Settings", None, 'view_all_transaction_role')
@@ -22,22 +36,33 @@ def get_permission_query_conditions_for_invoice(user=None):
         return ""
 
     # Check if sales team override is enabled
+    override_enabled = False
     try:
-        override_enabled = frappe.db.get_single_value("Basket4Me Settings", "override_sales_team_in_customer")
-        if override_enabled:
-            return ""  # No restrictions if override is enabled
-    except:
+        override_enabled = bool(frappe.db.get_single_value("Basket4Me Settings", "override_sales_team_in_customer"))
+    except Exception:
         pass
+
+    parts = []
+
+    # Multi-company scoping: restrict to companies the user is configured for.
+    companies = _get_user_companies(user)
+    if companies:
+        parts.append(f"`tabSales Invoice`.company IN {_company_in_clause(companies)}")
+
+    if override_enabled:
+        # Sales-team check skipped; multi-company filter (if any) still applies
+        return " AND ".join(parts) if parts else ""
 
     sales_person = get_sales_person(user)
     if sales_person:
-        conditions = f"""
-            (`tabSales Invoice`.name IN (
-                SELECT parent
-                FROM `tabSales Team`
+        parts.append(f"""
+            `tabSales Invoice`.name IN (
+                SELECT parent FROM `tabSales Team`
                 WHERE sales_person = '{sales_person}'
-            ))
-        """
-        return conditions
+            )
+        """)
 
-    return " "
+    if not parts:
+        return " "
+
+    return "(" + ") AND (".join(parts) + ")"

@@ -558,6 +558,115 @@ def get_basket4me_settings():
     return
 
 
+# ============================================================================
+# Multi-company helpers (see docs/multi_company_api_changes.md)
+# ============================================================================
+
+def get_user_companies(user=None):
+    """Return list of companies the user's sales_person is configured for
+    in Basket4Me Settings → Sales Person Details. Returns [] if no sales
+    person is mapped or no rows have a company set."""
+    user = user or frappe.session.user
+    sp = frappe.db.get_value("Sales Person", {"custom_user": user}, "name")
+    if not sp:
+        return []
+    settings = get_basket4me_settings()
+    seen = []
+    for d in (settings.sales_person_details or []):
+        if d.sales_person == sp and d.company and d.company not in seen:
+            seen.append(d.company)
+    return seen
+
+
+def get_sales_person_details(sales_person, company=None):
+    """Return the Sales Person Detail child row matching (sales_person, company).
+    If company is None and the sales_person has exactly one row, return it.
+    Otherwise return None (caller must supply company to disambiguate)."""
+    if not sales_person:
+        return None
+    settings = get_basket4me_settings()
+    rows = [d for d in (settings.sales_person_details or []) if d.sales_person == sales_person]
+    if not rows:
+        return None
+    if company:
+        for d in rows:
+            if d.company == company:
+                return d
+        return None
+    return rows[0] if len(rows) == 1 else None
+
+
+def resolve_company(params=None, user=None):
+    """Resolve which company to use for a mutation.
+
+    Precedence:
+      1. params['company'] (or params.company) if provided
+      2. HTTP header X-Basket4me-Company
+      3. The user's only company (if exactly one)
+      4. None → caller should error
+
+    Returns the company name (str) or None.
+    """
+    user = user or frappe.session.user
+    if isinstance(params, dict):
+        c = params.get("company")
+        if c:
+            return c
+    try:
+        c = (frappe.request.headers.get("X-Basket4me-Company") if frappe.request else None) or None
+        if c:
+            return c
+    except Exception:
+        pass
+    companies = get_user_companies(user)
+    return companies[0] if len(companies) == 1 else None
+
+
+def assert_company_allowed(company, user=None):
+    """Raise PermissionError if the company is not in the user's allowed set.
+    Administrator is always allowed."""
+    user = user or frappe.session.user
+    if user == "Administrator":
+        return
+    allowed = get_user_companies(user)
+    if not allowed:
+        frappe.throw(
+            f"No company is configured for user {user} in Basket4Me Settings.",
+            exc=frappe.PermissionError,
+        )
+    if company and company not in allowed:
+        frappe.throw(
+            f"Not permitted for company '{company}'. Allowed: {', '.join(allowed)}",
+            exc=frappe.PermissionError,
+        )
+
+
+@frappe.whitelist(methods="GET")
+def get_user_companies_api(user_id=None):
+    """List companies the user's sales_person is configured for, plus the
+    default (first row in Basket4Me Settings). Frontend uses this to render
+    a company picker.
+
+    Response:
+        {
+            "user_id": "...",
+            "companies": ["A", "B"],
+            "default_company": "A"
+        }
+    """
+    try:
+        user_id = user_id or frappe.session.user
+        companies = get_user_companies(user_id)
+        return response("User companies fetched", {
+            "user_id": user_id,
+            "companies": companies,
+            "default_company": companies[0] if companies else None,
+        }, True, 200)
+    except Exception as e:
+        frappe.log_error(frappe.get_traceback(), "get_user_companies_api error")
+        return response(str(e), {}, False, 500)
+
+
 @frappe.whitelist()
 def get_modes_of_payment_for_company(doctype, txt, searchfield, start, page_len, filters):
     """Link-field query: return enabled Modes of Payment that have an

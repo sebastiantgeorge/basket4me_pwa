@@ -7,6 +7,18 @@ def get_sales_person(user):
     return sales_person
 
 
+def _get_user_companies(user):
+    try:
+        from basket4me_pwa.api import get_user_companies
+        return get_user_companies(user) or []
+    except Exception:
+        return []
+
+
+def _company_in_clause(companies):
+    return "(" + ",".join("'" + c.replace("'", "''") + "'" for c in companies) + ")"
+
+
 @frappe.whitelist()
 def get_permission_query_conditions_for_customer(user):
     view_all_role = frappe.get_value("Basket4Me Settings", None, 'view_all_transaction_role')
@@ -22,24 +34,25 @@ def get_permission_query_conditions_for_customer(user):
     if view_all_role and view_all_role in user_roles:
         return ""
 
-    # Check if sales team override is enabled
+    # Customer is not company-scoped here (customers can transact with any
+    # company). Multi-company filter applied on transactional doctypes instead.
+    override_enabled = False
     try:
-        override_enabled = frappe.db.get_single_value("Basket4Me Settings", "override_sales_team_in_customer")
-        if override_enabled:
-            return ""  # No restrictions if override is enabled
-    except:
+        override_enabled = bool(frappe.db.get_single_value("Basket4Me Settings", "override_sales_team_in_customer"))
+    except Exception:
         pass
+
+    if override_enabled:
+        return ""
 
     sales_person = get_sales_person(user)
     if sales_person:
-        conditions = f"""
-            (`tabCustomer`.name IN (
-                SELECT parent
-                FROM `tabSales Team`
+        return f"""
+            `tabCustomer`.name IN (
+                SELECT parent FROM `tabSales Team`
                 WHERE sales_person = '{sales_person}' AND parenttype = 'Customer'
-            ))
+            )
         """
-        return conditions
     return ""
 
 
@@ -58,16 +71,27 @@ def get_permission_query_conditions_for_payment_entry(user):
     if view_all_role and view_all_role in user_roles:
         return ""
 
-    # Check if sales team override is enabled
+    override_enabled = False
     try:
-        override_enabled = frappe.db.get_single_value("Basket4Me Settings", "override_sales_team_in_customer")
-        if override_enabled:
-            return ""  # No restrictions if override is enabled
-    except:
+        override_enabled = bool(frappe.db.get_single_value("Basket4Me Settings", "override_sales_team_in_customer"))
+    except Exception:
         pass
+
+    parts = []
+
+    # Multi-company scoping for Payment Entry
+    companies = _get_user_companies(user)
+    if companies:
+        parts.append(f"`tabPayment Entry`.company IN {_company_in_clause(companies)}")
+
+    if override_enabled:
+        return " AND ".join(parts) if parts else ""
 
     sales_person = get_sales_person(user)
     if sales_person:
-        conditions = f""" `tabPayment Entry`.custom_sales_person = '{sales_person}' """
-        return conditions
-    return ""
+        parts.append(f"`tabPayment Entry`.custom_sales_person = '{sales_person}'")
+
+    if not parts:
+        return ""
+
+    return "(" + ") AND (".join(parts) + ")"
