@@ -9,7 +9,7 @@ Frontend-facing contract for the multi-company endpoints. Backward compatible: s
 
 ## 1. Discover allowed companies for a user
 
-### `GET basket4me_pwa.api.get_user_companies_api`
+### `GET basket4me_pwa.api.get_user_companies`
 
 **Query params**
 
@@ -83,7 +83,7 @@ The existing login enrichment endpoint now carries the same fields, so frontends
 }
 ```
 
-The per-company metadata (`company_address`, `company_gst_no`, `company_logo`, `company_default_price_list`, `company_bank_*`) is returned ONLY for `company_name` / `default_company`. For full metadata on other companies, call `get_user_companies_api`.
+The per-company metadata (`company_address`, `company_gst_no`, `company_logo`, `company_default_price_list`, `company_bank_*`) is returned ONLY for `company_name` / `default_company`. For full metadata on other companies, call `get_user_companies`.
 
 ---
 
@@ -226,10 +226,10 @@ If no exact-company match is found, falls back to `accounts[0]` to keep single-c
 
 1. On login (`auth.user_login`), then `auth.get_user_details`:
    - Read `companies` + `default_company`.
-2. Optional: call `get_user_companies_api` for the full per-company metadata if not already in `get_user_details`.
+2. Optional: call `get_user_companies` for the full per-company metadata if not already in `get_user_details`.
 3. If `companies.length > 1`: render a company picker (header / drawer). Persist selection in local storage.
 4. On every API call, include either `params.company` (mutations) or header `X-Basket4me-Company` (any request).
-5. On a `403 PermissionError: Not permitted for company …` response → re-fetch `get_user_companies_api` (the user's allowed set may have changed) and re-prompt.
+5. On a `403 PermissionError: Not permitted for company …` response → re-fetch `get_user_companies` (the user's allowed set may have changed) and re-prompt.
 6. On a `400 "company is required …"` response with `allowed_companies` in the data → show the picker.
 
 ---
@@ -257,6 +257,6 @@ If no exact-company match is found, falls back to `accounts[0]` to keep single-c
 | `1dccee9` | Foundation — helpers, endpoint, permission scoping, login enrichment |
 | `5e8207b` | Phase 2+4 — mutation APIs use `resolve_company` + MOP account row matches company |
 | `41aab58` | Phase 3 — read APIs accept optional `company` filter |
-| `c47ef0a` | `get_user_companies_api` returns per-company metadata for the picker |
+| `c47ef0a` | `get_user_companies` returns per-company metadata for the picker |
 
 Verify on bench: `cd ~/frappe-bench/apps/basket4me_pwa && git log -1 --oneline` should show `c47ef0a` or newer.

@@ -9,8 +9,8 @@ def get_sales_person(user):
 
 def _get_user_companies(user):
     try:
-        from basket4me_pwa.api import get_user_companies
-        return get_user_companies(user) or []
+        from basket4me_pwa.api import _get_user_companies as _api_get_user_companies
+        return _api_get_user_companies(user) or []
     except Exception:
         return []
 

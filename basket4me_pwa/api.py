@@ -562,7 +562,7 @@ def get_basket4me_settings():
 # Multi-company helpers (see docs/multi_company_api_changes.md)
 # ============================================================================
 
-def get_user_companies(user=None):
+def _get_user_companies(user=None):
     """Return list of companies the user's sales_person is configured for
     in Basket4Me Settings → Sales Person Details. Returns [] if no sales
     person is mapped or no rows have a company set."""
@@ -618,7 +618,7 @@ def resolve_company(params=None, user=None):
             return c
     except Exception:
         pass
-    companies = get_user_companies(user)
+    companies = _get_user_companies(user)
     return companies[0] if len(companies) == 1 else None
 
 
@@ -628,7 +628,7 @@ def assert_company_allowed(company, user=None):
     user = user or frappe.session.user
     if user == "Administrator":
         return
-    allowed = get_user_companies(user)
+    allowed = _get_user_companies(user)
     if not allowed:
         frappe.throw(
             f"No company is configured for user {user} in Basket4Me Settings.",
@@ -663,7 +663,7 @@ def get_company_filter_for_reads(requested_company=None, user=None):
     if requested_company:
         assert_company_allowed(requested_company, user)
         return ("company = %s", [requested_company])
-    allowed = get_user_companies(user)
+    allowed = _get_user_companies(user)
     if not allowed:
         return ("", [])
     placeholders = ",".join(["%s"] * len(allowed))
@@ -761,7 +761,7 @@ def get_company_metadata(company_name):
 
 
 @frappe.whitelist(methods="GET")
-def get_user_companies_api(user_id=None):
+def get_user_companies(user_id=None):
     """List companies the user's sales_person is configured for, plus the
     default (first row in Basket4Me Settings). Each entry is enriched with
     the same per-company fields exposed by auth.get_user_details so the
@@ -791,7 +791,7 @@ def get_user_companies_api(user_id=None):
     """
     try:
         user_id = user_id or frappe.session.user
-        company_names = get_user_companies(user_id)
+        company_names = _get_user_companies(user_id)
         enriched = [get_company_metadata(c) for c in company_names]
         return response("User companies fetched", {
             "user_id": user_id,
@@ -800,8 +800,16 @@ def get_user_companies_api(user_id=None):
             "default_company": company_names[0] if company_names else None,
         }, True, 200)
     except Exception as e:
-        frappe.log_error(frappe.get_traceback(), "get_user_companies_api error")
+        frappe.log_error(frappe.get_traceback(), "get_user_companies error")
         return response(str(e), {}, False, 500)
+
+
+# Back-compat alias: earlier docs referenced `get_user_companies_api`.
+@frappe.whitelist(methods="GET")
+def get_user_companies_api(user_id=None):
+    """Alias of get_user_companies — kept for back-compat with earlier
+    docs that referenced this method name."""
+    return get_user_companies(user_id=user_id)
 
 
 @frappe.whitelist()
@@ -1284,7 +1292,7 @@ def get_invoice_list(name=None, customer=None, status=None, search=None,
         # Multi-company: explicit filter (validated) or implicit user-allowed set.
         if company:
             assert_company_allowed(company)
-        _allowed_companies = get_user_companies(frappe.session.user) if frappe.session.user != "Administrator" else []
+        _allowed_companies = _get_user_companies(frappe.session.user) if frappe.session.user != "Administrator" else []
 
         filters = {"is_return": 0}
         fields = ['name', 'customer', 'customer_name', 'posting_date', 'grand_total', 'outstanding_amount', 'status', 'docstatus', 'creation', 'company']
@@ -1980,7 +1988,7 @@ def last_invoice_cust_receipt(user_id=None, date=None, company=None):
         # Multi-company: validate / scope
         if company:
             assert_company_allowed(company, user_id)
-        _allowed_companies = get_user_companies(user_id) if user_id != "Administrator" else []
+        _allowed_companies = _get_user_companies(user_id) if user_id != "Administrator" else []
 
         si_company_filter = ""
         si_company_values = []
@@ -3289,10 +3297,10 @@ def create_sales_invoice(params):
 
         sales_person_details = get_sales_person_details(sales_person, company)
         if not sales_person_details:
-            if not company and len(get_user_companies(frappe.session.user)) > 1:
+            if not company and len(_get_user_companies(frappe.session.user)) > 1:
                 return response(
                     "company is required (user is configured for multiple companies)",
-                    {"allowed_companies": get_user_companies(frappe.session.user)},
+                    {"allowed_companies": _get_user_companies(frappe.session.user)},
                     False, 400,
                 )
             return response(f"No Basket4Me Settings row for sales person {sales_person} / company {company or '(any)'}", {}, False, 400)
@@ -4518,10 +4526,10 @@ def create_sales_invoice_return(params):
             assert_company_allowed(company)
         sales_person_details = get_sales_person_details(sales_person, company)
         if not sales_person_details:
-            if not company and len(get_user_companies(frappe.session.user)) > 1:
+            if not company and len(_get_user_companies(frappe.session.user)) > 1:
                 return response(
                     "company is required (user is configured for multiple companies)",
-                    {"allowed_companies": get_user_companies(frappe.session.user)},
+                    {"allowed_companies": _get_user_companies(frappe.session.user)},
                     False, 400,
                 )
             return response(f"No Basket4Me Settings row for sales person {sales_person} / company {company or '(any)'}", {}, False, 400)
@@ -4861,7 +4869,7 @@ def get_receipt_list(name=None, customer=None, status=None, search=None, from_da
         # Multi-company scoping
         if company:
             assert_company_allowed(company)
-        _allowed_companies = get_user_companies(frappe.session.user) if frappe.session.user != "Administrator" else []
+        _allowed_companies = _get_user_companies(frappe.session.user) if frappe.session.user != "Administrator" else []
 
         filters = {"party_type": "Customer"}
         if company:
@@ -5212,10 +5220,10 @@ def create_payment_entry(params=None):
                 assert_company_allowed(company_name)
             sales_person_details = get_sales_person_details(sales_person, company_name)
             if not sales_person_details:
-                if not company_name and len(get_user_companies(frappe.session.user)) > 1:
+                if not company_name and len(_get_user_companies(frappe.session.user)) > 1:
                     return response(
                         "company is required (user is configured for multiple companies)",
-                        {"allowed_companies": get_user_companies(frappe.session.user)},
+                        {"allowed_companies": _get_user_companies(frappe.session.user)},
                         False, 400,
                     )
                 return response(f"No Basket4Me Settings row for sales person {sales_person} / company {company_name or '(any)'}", {}, False, 400)
@@ -5449,7 +5457,7 @@ def get_return_invoice_list(name=None, customer=None, status=None, search=None,
         # Multi-company scoping
         if company:
             assert_company_allowed(company)
-        _allowed_companies = get_user_companies(frappe.session.user) if frappe.session.user != "Administrator" else []
+        _allowed_companies = _get_user_companies(frappe.session.user) if frappe.session.user != "Administrator" else []
 
         fields = ['name', 'customer', 'customer_name', 'posting_date', 'grand_total',
                   'outstanding_amount', 'status', 'docstatus', 'return_against', 'creation', 'company']
@@ -8416,10 +8424,10 @@ def create_sales_order(params):
             assert_company_allowed(company)
         sales_person_details = get_sales_person_details(sales_person, company)
         if not sales_person_details:
-            if not company and len(get_user_companies(frappe.session.user)) > 1:
+            if not company and len(_get_user_companies(frappe.session.user)) > 1:
                 return response(
                     "company is required (user is configured for multiple companies)",
-                    {"allowed_companies": get_user_companies(frappe.session.user)},
+                    {"allowed_companies": _get_user_companies(frappe.session.user)},
                     False, 400,
                 )
             return response(f"No Basket4Me Settings row for sales person {sales_person} / company {company or '(any)'}", {}, False, 400)
@@ -8929,7 +8937,7 @@ def get_sales_order_list(name=None, customer=None, status=None, search=None, fro
         # Multi-company scoping
         if company:
             assert_company_allowed(company)
-        _allowed_companies = get_user_companies(frappe.session.user) if frappe.session.user != "Administrator" else []
+        _allowed_companies = _get_user_companies(frappe.session.user) if frappe.session.user != "Administrator" else []
 
         filters = {}
         if company:
@@ -9385,7 +9393,7 @@ def get_dashboard_summary(period="daily", from_date=None, to_date=None, company=
         # Multi-company scoping: build a parameterized clause + values once
         if company:
             assert_company_allowed(company)
-        _allowed_companies = get_user_companies(frappe.session.user) if frappe.session.user != "Administrator" else []
+        _allowed_companies = _get_user_companies(frappe.session.user) if frappe.session.user != "Administrator" else []
         if company:
             _company_so = " AND so.company = %s "
             _company_si = " AND si.company = %s "
@@ -10487,7 +10495,7 @@ def get_delivery_note_list(name=None, customer=None, status=None, search=None,
         # Multi-company scoping
         if company:
             assert_company_allowed(company)
-        _allowed_companies = get_user_companies(frappe.session.user) if frappe.session.user != "Administrator" else []
+        _allowed_companies = _get_user_companies(frappe.session.user) if frappe.session.user != "Administrator" else []
 
         filters = {}
         if company:

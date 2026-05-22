@@ -29,7 +29,7 @@ These let the existing call sites change from "find a row" to "find the row for 
 
 ## 3. New whitelisted endpoint
 
-`GET /api/method/basket4me_pwa.api.get_user_companies_api?user_id=<optional>`
+`GET /api/method/basket4me_pwa.api.get_user_companies?user_id=<optional>`
 
 Each entry in `companies[]` is enriched with the same per-company fields `auth.get_user_details` exposes, so the picker has everything in one call.
 
