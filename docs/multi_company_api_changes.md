@@ -29,15 +29,53 @@ These let the existing call sites change from "find a row" to "find the row for 
 
 ## 3. New whitelisted endpoint
 
-`GET /api/method/basket4me_pwa.api.get_user_companies`
+`GET /api/method/basket4me_pwa.api.get_user_companies_api?user_id=<optional>`
+
+Each entry in `companies[]` is enriched with the same per-company fields `auth.get_user_details` exposes, so the picker has everything in one call.
+
 ```json
 {
-  "user_id": "btladmin@btl.in",
-  "companies": ["BALAJI TRADE LINKS", "BTL HOLDINGS"],
-  "default_company": "BALAJI TRADE LINKS"
+  "message": "User companies fetched",
+  "success": true,
+  "data": {
+    "user_id": "btladmin@btl.in",
+    "companies": [
+      {
+        "name": "BALAJI TRADE LINKS",
+        "company_name": "BALAJI TRADE LINKS",
+        "company_address": "12 ABC Road, Cochin, KL, 682001, India",
+        "company_gst_no": "32ABCDE1234F1Z5",
+        "company_logo": "https://btlerp.m.frappe.cloud/files/btl-logo.png",
+        "company_default_price_list": "Standard Selling",
+        "company_bank_name": "Canara Bank",
+        "company_bank_acc_no": "1234567890",
+        "company_bank_ifsc": "CNRB0001234",
+        "company_bank_branch": "CNRB0001"
+      },
+      {
+        "name": "BTL HOLDINGS",
+        "company_name": "BTL HOLDINGS",
+        "company_address": "...",
+        "company_gst_no": null,
+        "company_logo": null,
+        "company_default_price_list": "Standard Selling",
+        "company_bank_name": null,
+        "company_bank_acc_no": null,
+        "company_bank_ifsc": null,
+        "company_bank_branch": null
+      }
+    ],
+    "company_names": ["BALAJI TRADE LINKS", "BTL HOLDINGS"],
+    "default_company": "BALAJI TRADE LINKS"
+  }
 }
 ```
-Frontend uses this on login to populate a company picker. `default_company` = first row OR a new `is_default` Check field on the child table (optional follow-up).
+
+- `companies[]` — list of dicts, full per-company metadata.
+- `company_names[]` — convenience plain list (same order). Use this if you only need names.
+- `default_company` — first configured row. Frontend may persist a user override; falls back to this on first login.
+
+Frontend usage: call this once after login → render the picker → persist the selected `name`. Subsequent mutations send it as `params.company` or header `X-Basket4me-Company`.
 
 ---
 

@@ -670,26 +670,134 @@ def get_company_filter_for_reads(requested_company=None, user=None):
     return (f"company IN ({placeholders})", list(allowed))
 
 
+def get_company_metadata(company_name):
+    """Return the same per-company fields auth.get_user_details exposes,
+    for a single company. Mirrors the lookup logic used during login so
+    get_user_companies_api can return rich per-company info for the picker.
+    """
+    out = {
+        "name": company_name,
+        "company_name": company_name,
+        "company_logo": None,
+        "company_address": None,
+        "company_gst_no": None,
+        "company_default_price_list": None,
+        "company_bank_name": None,
+        "company_bank_acc_no": None,
+        "company_bank_ifsc": None,
+        "company_bank_branch": None,
+    }
+    if not company_name:
+        return out
+
+    # Company doc fields
+    company_fields = ["company_logo"]
+    if frappe.db.has_column("Company", "default_price_list"):
+        company_fields.append("default_price_list")
+    for gst_field in ["tax_id", "gstin", "custom_gstin"]:
+        if frappe.db.has_column("Company", gst_field):
+            company_fields.append(gst_field)
+            break
+    try:
+        company_doc = frappe.db.get_value("Company", company_name, company_fields, as_dict=True)
+        if company_doc:
+            out["company_logo"] = company_doc.get("company_logo")
+            out["company_default_price_list"] = company_doc.get("default_price_list")
+            out["company_gst_no"] = (
+                company_doc.get("tax_id") or company_doc.get("gstin") or company_doc.get("custom_gstin")
+            )
+    except Exception:
+        pass
+    # Fallback: Selling Settings default price list
+    if not out["company_default_price_list"]:
+        try:
+            out["company_default_price_list"] = frappe.db.get_single_value("Selling Settings", "selling_price_list")
+        except Exception:
+            pass
+    # Absolute URL for logo
+    if out["company_logo"] and not out["company_logo"].startswith("http"):
+        out["company_logo"] = frappe.utils.get_url(out["company_logo"])
+
+    # Address (primary)
+    try:
+        addr_name = frappe.db.get_value(
+            "Dynamic Link",
+            {"link_doctype": "Company", "link_name": company_name, "parenttype": "Address"},
+            "parent",
+        )
+        if addr_name:
+            addr = frappe.db.get_value(
+                "Address", addr_name,
+                ["address_line1", "address_line2", "city", "state", "pincode", "country"],
+                as_dict=True,
+            )
+            if addr:
+                parts = [addr.address_line1, addr.address_line2, addr.city, addr.state, addr.pincode, addr.country]
+                out["company_address"] = ", ".join([p for p in parts if p])
+    except Exception:
+        pass
+
+    # Bank details (Company.default_bank_account → Bank Account)
+    try:
+        default_bank = frappe.db.get_value("Company", company_name, "default_bank_account")
+        if default_bank:
+            bank_doc = frappe.db.get_value(
+                "Bank Account", default_bank,
+                ["bank", "bank_account_no", "branch_code"],
+                as_dict=True,
+            )
+            if bank_doc:
+                out["company_bank_name"] = bank_doc.get("bank")
+                out["company_bank_acc_no"] = bank_doc.get("bank_account_no")
+                out["company_bank_ifsc"] = bank_doc.get("branch_code")
+                if out["company_bank_name"]:
+                    out["company_bank_branch"] = (
+                        frappe.db.get_value("Bank", out["company_bank_name"], "swift_number") or None
+                    )
+    except Exception:
+        pass
+
+    return out
+
+
 @frappe.whitelist(methods="GET")
 def get_user_companies_api(user_id=None):
     """List companies the user's sales_person is configured for, plus the
-    default (first row in Basket4Me Settings). Frontend uses this to render
-    a company picker.
+    default (first row in Basket4Me Settings). Each entry is enriched with
+    the same per-company fields exposed by auth.get_user_details so the
+    frontend's company picker has everything it needs in one call.
 
     Response:
         {
             "user_id": "...",
-            "companies": ["A", "B"],
-            "default_company": "A"
+            "companies": [
+                {
+                    "name": "BTL",
+                    "company_name": "BTL",
+                    "company_address": "...",
+                    "company_gst_no": "...",
+                    "company_logo": "https://.../logo.png",
+                    "company_default_price_list": "Standard Selling",
+                    "company_bank_name": "...",
+                    "company_bank_acc_no": "...",
+                    "company_bank_ifsc": "...",
+                    "company_bank_branch": "..."
+                },
+                ...
+            ],
+            "company_names": ["BTL", "BTL HOLDINGS"],
+            "default_company": "BTL"
         }
     """
     try:
         user_id = user_id or frappe.session.user
-        companies = get_user_companies(user_id)
+        company_names = get_user_companies(user_id)
+        enriched = [get_company_metadata(c) for c in company_names]
         return response("User companies fetched", {
             "user_id": user_id,
-            "companies": companies,
-            "default_company": companies[0] if companies else None,
+            "companies": enriched,
+            "company_names": company_names,
+            "default_company": company_names[0] if company_names else None,
         }, True, 200)
     except Exception as e:
         frappe.log_error(frappe.get_traceback(), "get_user_companies_api error")
