@@ -172,15 +172,23 @@ PermissionError: Not permitted for company 'X'. Allowed: BALAJI TRADE LINKS, BTL
 
 All listing/summary endpoints accept an optional `company` param. When omitted, the response spans **all** companies the user is configured for. When provided, the value is validated against the user's allowed set.
 
-| endpoint | new param |
-|---|---|
-| `GET basket4me_pwa.api.get_invoice_list` | `company` |
-| `GET basket4me_pwa.api.get_return_invoice_list` | `company` |
-| `GET basket4me_pwa.api.get_sales_order_list` | `company` |
-| `GET basket4me_pwa.api.get_delivery_note_list` | `company` |
-| `GET basket4me_pwa.api.get_receipt_list` | `company` |
-| `GET basket4me_pwa.api.get_dashboard_summary` | `company` |
-| `GET basket4me_pwa.api.last_invoice_cust_receipt` | `company` |
+| endpoint | new param | notes |
+|---|---|---|
+| `GET basket4me_pwa.api.get_invoice_list` | `company` | |
+| `GET basket4me_pwa.api.get_return_invoice_list` | `company` | |
+| `GET basket4me_pwa.api.get_sales_order_list` | `company` | |
+| `GET basket4me_pwa.api.get_delivery_note_list` | `company` | |
+| `GET basket4me_pwa.api.get_receipt_list` | `company` | |
+| `GET basket4me_pwa.api.get_dashboard_summary` | `company` | |
+| `GET basket4me_pwa.api.last_invoice_cust_receipt` | `company` | |
+| `GET basket4me_pwa.api.get_warehouse_list` | `company` | Warehouse doctype has a native `company` column |
+| `GET basket4me_pwa.api.get_available_modes_of_payment` | `company` | Overrides the legacy "first SP-details row" lookup |
+| `GET basket4me_pwa.api.get_customer_route_list` | `company` | Only applied if Customer Route has a `company` column on the live site (auto-detected) |
+| `GET basket4me_pwa.api.get_price_list_details` | `company` | Restricts to price lists configured in Basket4Me Settings → Sales Person Details for the chosen company |
+| `GET basket4me_pwa.api.get_customer_outstanding` | `company` | Scopes the SI aggregation; sums across allowed-companies when omitted |
+| `GET basket4me_pwa.api.get_customer_visits` | `company` | Post-filters visit JSON. Visits stamped before multi-company rollout (no `company` field) are returned unconditionally |
+| `POST basket4me_pwa.api.mark_customer_visit` | `params.company` | Stamps the company onto the visit JSON for later filtering |
+| `POST basket4me_pwa.api.receipt_details` | — | No new param; the PE doc's own `company` is checked against the user's allowed set (403 on mismatch) |
 
 List responses now include `company` on each row. Detail responses already do.
 

@@ -3768,10 +3768,20 @@ def update_sales_invoice(params):
 
 
 @frappe.whitelist(methods="GET")
-def get_warehouse_list(name=None):
+def get_warehouse_list(name=None, company=None):
     try:
+        # Multi-company scoping (Warehouse has a company column)
+        if company:
+            assert_company_allowed(company)
+        _allowed_companies = _get_user_companies(frappe.session.user) if frappe.session.user != "Administrator" else []
+
         filters = {}
-        fields = ['name']
+        if company:
+            filters['company'] = company
+        elif _allowed_companies:
+            filters['company'] = ["in", _allowed_companies]
+
+        fields = ['name', 'company']
 
         if name:
             filters['name'] = name
@@ -5102,27 +5112,33 @@ def customer_invoice_details(customer=None):
 
 
 @frappe.whitelist(methods="GET")
-def get_available_modes_of_payment():
+def get_available_modes_of_payment(company=None):
     """
     Return all Modes of Payment configured in Basket4Me Settings → Mode Of
     Payment Details. The configured table is the source of truth — admins
     add every allowed MOP there.
 
-    If the row has a `company` set, it's filtered by the logged-in user's
-    sales-person company (so sales people in different companies only see
-    their own MOPs).
+    Multi-company: pass `company` to scope to that company explicitly. When
+    omitted, falls back to the user's first configured company (legacy
+    behavior). When the user is configured for multiple companies, callers
+    SHOULD pass `company` — otherwise the picker only sees the default.
     """
     try:
         settings = get_basket4me_settings()
 
         # Determine sales person + their company (used for per-company MOP filtering).
         sales_person = frappe.db.get_value("Sales Person", {"custom_user": frappe.session.user}, "name")
-        sp_company = None
-        if sales_person:
-            for detail in settings.sales_person_details:
-                if detail.sales_person == sales_person:
-                    sp_company = detail.company
-                    break
+
+        if company:
+            assert_company_allowed(company)
+            sp_company = company
+        else:
+            sp_company = None
+            if sales_person:
+                for detail in settings.sales_person_details:
+                    if detail.sales_person == sales_person:
+                        sp_company = detail.company
+                        break
 
         available_modes = []
         seen = set()
@@ -5777,6 +5793,16 @@ def get_returned_qty(invoice_name=None):
 def receipt_details(receipt_id=None):
     try:
         receipt = frappe.get_doc("Payment Entry", receipt_id)
+
+        # Multi-company guard: verify the PE belongs to a company the user is allowed in.
+        if frappe.session.user != "Administrator":
+            allowed = _get_user_companies(frappe.session.user)
+            if allowed and getattr(receipt, "company", None) and receipt.company not in allowed:
+                return response(
+                    f"Not permitted: receipt belongs to company '{receipt.company}' (allowed: {', '.join(allowed)})",
+                    {}, False, 403,
+                )
+
         response_items = []
         response_deductions = []
 
@@ -6202,7 +6228,7 @@ def get_customer_group_list(name=None):
     
 
 @frappe.whitelist(methods="GET")
-def get_customer_route_list(name=None, route_code=None, today_only=None):
+def get_customer_route_list(name=None, route_code=None, today_only=None, company=None):
     """
     Get list of Customer Routes.
 
@@ -6210,13 +6236,27 @@ def get_customer_route_list(name=None, route_code=None, today_only=None):
         name: Search by route code or name
         route_code: Filter by exact route code
         today_only: If "1", return only routes scheduled for today
+        company: optional — when Customer Route has a company column, scope to
+                 that company (or to the user's allowed-companies set if omitted)
     """
     try:
+        # Multi-company scoping (only if Customer Route has a `company` column)
+        _route_has_company = frappe.db.has_column("Customer Route", "company")
+        if company:
+            assert_company_allowed(company)
+        _allowed_companies = _get_user_companies(frappe.session.user) if frappe.session.user != "Administrator" else []
+
         filters = {}
         or_filters = None
 
         if route_code:
             filters["route_code"] = route_code
+
+        if _route_has_company:
+            if company:
+                filters["company"] = company
+            elif _allowed_companies:
+                filters["company"] = ["in", _allowed_companies]
 
         if name:
             or_filters = [
@@ -6224,15 +6264,19 @@ def get_customer_route_list(name=None, route_code=None, today_only=None):
                 ["route_name", "like", f"%{name}%"],
             ]
 
+        _route_fields = [
+            "name", "route_code", "route_name",
+            "monday", "tuesday", "wednesday", "thursday",
+            "friday", "saturday", "sunday",
+        ]
+        if _route_has_company:
+            _route_fields.append("company")
+
         routes = frappe.get_all(
             "Customer Route",
             filters=filters,
             or_filters=or_filters,
-            fields=[
-                "name", "route_code", "route_name",
-                "monday", "tuesday", "wednesday", "thursday",
-                "friday", "saturday", "sunday"
-            ],
+            fields=_route_fields,
             order_by="route_code asc",
             limit_page_length=0
         )
@@ -6579,7 +6623,7 @@ def get_price_list():
 
 
 @frappe.whitelist(methods="GET")
-def get_price_list_details(name=None, page_number=1, page_size=20):
+def get_price_list_details(name=None, page_number=1, page_size=20, company=None):
     """
     Get price lists with associated customers, item count, and company info.
 
@@ -6587,10 +6631,34 @@ def get_price_list_details(name=None, page_number=1, page_size=20):
         name: Filter/search by price list name
         page_number: Page number (default: 1)
         page_size: Records per page (default: 20)
+        company: optional — restrict to price lists configured in Basket4Me
+                 Settings → Sales Person Details for this company. When omitted
+                 (multi-company user) restricts to all price lists configured
+                 across the user's allowed companies.
     """
     try:
         _page_size = int(page_size or 20)
         _offset = (int(page_number or 1) - 1) * _page_size
+
+        # Multi-company: restrict by price lists configured in sales_person_details
+        if company:
+            assert_company_allowed(company)
+        _company_price_lists = None
+        if frappe.session.user != "Administrator":
+            sp = frappe.db.get_value("Sales Person", {"custom_user": frappe.session.user}, "name")
+            if sp:
+                _allowed_companies = _get_user_companies(frappe.session.user)
+                settings = get_basket4me_settings()
+                _company_price_lists = []
+                for d in (settings.sales_person_details or []):
+                    if d.sales_person != sp or not d.price_list:
+                        continue
+                    if company and d.company != company:
+                        continue
+                    if not company and _allowed_companies and d.company not in _allowed_companies:
+                        continue
+                    if d.price_list not in _company_price_lists:
+                        _company_price_lists.append(d.price_list)
 
         filters = {"enabled": 1, "selling": 1}
         or_filters = None
@@ -6609,6 +6677,25 @@ def get_price_list_details(name=None, page_number=1, page_size=20):
                     "page_number": int(page_number or 1), "page_size": _page_size,
                 }, True, 200)
             filters["name"] = ["in", allowed]
+
+        # Intersect with sales-person-details-configured price lists
+        if _company_price_lists is not None:
+            if not _company_price_lists:
+                return response("Price List details fetched", {
+                    "price_lists": [], "total_count": 0,
+                    "page_number": int(page_number or 1), "page_size": _page_size,
+                }, True, 200)
+            existing = filters.get("name")
+            if existing and isinstance(existing, list) and existing[0] == "in":
+                intersected = [n for n in existing[1] if n in _company_price_lists]
+                if not intersected:
+                    return response("Price List details fetched", {
+                        "price_lists": [], "total_count": 0,
+                        "page_number": int(page_number or 1), "page_size": _page_size,
+                    }, True, 200)
+                filters["name"] = ["in", intersected]
+            else:
+                filters["name"] = ["in", _company_price_lists]
 
         price_lists = frappe.get_all(
             "Price List",
@@ -9543,6 +9630,7 @@ def mark_customer_visit(params):
         customer: Customer name (required)
         latitude / longitude: GPS coordinates (optional)
         remarks: Visit notes (optional)
+        company: optional — stamped on the visit JSON for later filtering
     """
     try:
         if isinstance(params, str):
@@ -9556,6 +9644,12 @@ def mark_customer_visit(params):
         if not sales_person:
             return response("No Sales Person linked", {}, False, 400)
 
+        # Multi-company: stamp the visit with the active company so
+        # get_customer_visits can filter by it later.
+        company = resolve_company(params)
+        if company:
+            assert_company_allowed(company)
+
         # Use Comment as a lightweight visit log (no custom doctype needed)
         comment = frappe.get_doc({
             "doctype": "Comment",
@@ -9565,6 +9659,7 @@ def mark_customer_visit(params):
             "content": json.dumps({
                 "type": "customer_visit",
                 "sales_person": sales_person,
+                "company": company,
                 "visit_date": nowdate(),
                 "visit_time": frappe.utils.now_datetime().strftime("%H:%M:%S"),
                 "latitude": params.get("latitude"),
@@ -9581,6 +9676,7 @@ def mark_customer_visit(params):
             {
                 "customer": customer,
                 "sales_person": sales_person,
+                "company": company,
                 "visit_date": nowdate(),
             },
             True, 200,
@@ -9591,12 +9687,21 @@ def mark_customer_visit(params):
 
 
 @frappe.whitelist(methods="GET")
-def get_customer_visits(customer=None, from_date=None, to_date=None):
-    """Get customer visit history for the logged-in salesperson."""
+def get_customer_visits(customer=None, from_date=None, to_date=None, company=None):
+    """Get customer visit history for the logged-in salesperson.
+
+    company: optional — when provided, only returns visits stamped with this
+    company (visits recorded before multi-company rollout have no company
+    field and are returned unconditionally).
+    """
     try:
         sales_person = frappe.db.get_value("Sales Person", {"custom_user": frappe.session.user}, "name")
         if not sales_person:
             return response("No Sales Person linked", {}, False, 400)
+
+        if company:
+            assert_company_allowed(company)
+        _allowed_companies = _get_user_companies(frappe.session.user) if frappe.session.user != "Administrator" else []
 
         today = nowdate()
         start = from_date or today
@@ -9617,6 +9722,14 @@ def get_customer_visits(customer=None, from_date=None, to_date=None):
         for v in visits:
             try:
                 data = json.loads(v.content)
+                # Multi-company post-filter: skip visits not in the requested
+                # company; legacy visits without `company` are returned.
+                visit_company = data.get("company")
+                if company:
+                    if visit_company and visit_company != company:
+                        continue
+                elif _allowed_companies and visit_company and visit_company not in _allowed_companies:
+                    continue
                 data["customer"] = v.reference_name
                 data["customer_name"] = frappe.db.get_value("Customer", v.reference_name, "customer_name")
                 data["creation"] = str(v.creation)
@@ -9874,7 +9987,7 @@ def get_customer_balance_summary(customer=None):
 
 
 @frappe.whitelist(methods=["GET", "POST"])
-def get_customer_outstanding(customer=None, customers=None):
+def get_customer_outstanding(customer=None, customers=None, company=None):
     """
     Get outstanding balance for one or more customers.
 
@@ -9884,6 +9997,8 @@ def get_customer_outstanding(customer=None, customers=None):
     Query/body params (any of):
         customer: single customer name (string)
         customers: array or comma-separated string of customer names
+        company: optional — scope SI aggregation to this company. When omitted,
+                 sums across the user's allowed-companies set.
 
     Response:
         Single customer: { customer, outstanding_balance }
@@ -9898,6 +10013,8 @@ def get_customer_outstanding(customer=None, customers=None):
                 if body:
                     customer = body.get("customer") or customer
                     customers = body.get("customers") or customers
+                    if not company:
+                        company = body.get("company")
             except Exception:
                 pass
 
@@ -9913,6 +10030,21 @@ def get_customer_outstanding(customer=None, customers=None):
         if not customers or not isinstance(customers, list):
             return response("customer or customers (array) is required", {}, False, 400)
 
+        # Multi-company scoping
+        if company:
+            assert_company_allowed(company)
+        _allowed_companies = _get_user_companies(frappe.session.user) if frappe.session.user != "Administrator" else []
+
+        _company_clause = ""
+        _company_values = []
+        if company:
+            _company_clause = " AND company = %s "
+            _company_values = [company]
+        elif _allowed_companies:
+            _ph = ",".join(["%s"] * len(_allowed_companies))
+            _company_clause = f" AND company IN ({_ph}) "
+            _company_values = list(_allowed_companies)
+
         # Single batched SQL — fast even for 100s of customers
         placeholders = ",".join(["%s"] * len(customers))
         rows = frappe.db.sql(f"""
@@ -9920,8 +10052,9 @@ def get_customer_outstanding(customer=None, customers=None):
             FROM `tabSales Invoice`
             WHERE customer IN ({placeholders})
               AND docstatus = 1 AND outstanding_amount > 0
+              {_company_clause}
             GROUP BY customer
-        """, customers, as_dict=True)
+        """, list(customers) + _company_values, as_dict=True)
         balance_map = {r["customer"]: flt(r["balance"]) for r in rows}
 
         balances = [
