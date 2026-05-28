@@ -9629,7 +9629,8 @@ def mark_customer_visit(params):
     Args (via params):
         customer: Customer name (required)
         latitude / longitude: GPS coordinates (optional)
-        remarks: Visit notes (optional)
+        remarks: Visit notes (optional) — also exposed as `notes` in reads
+        purpose_of_visit: Reason for the visit (optional, free-form string)
         company: optional — stamped on the visit JSON for later filtering
     """
     try:
@@ -9665,6 +9666,7 @@ def mark_customer_visit(params):
                 "latitude": params.get("latitude"),
                 "longitude": params.get("longitude"),
                 "remarks": params.get("remarks", ""),
+                "purpose_of_visit": params.get("purpose_of_visit", ""),
             }),
             "comment_email": frappe.session.user,
         })
@@ -9678,6 +9680,7 @@ def mark_customer_visit(params):
                 "sales_person": sales_person,
                 "company": company,
                 "visit_date": nowdate(),
+                "purpose_of_visit": params.get("purpose_of_visit", ""),
             },
             True, 200,
         )
@@ -9687,12 +9690,23 @@ def mark_customer_visit(params):
 
 
 @frappe.whitelist(methods="GET")
-def get_customer_visits(customer=None, from_date=None, to_date=None, company=None):
+def get_customer_visits(customer=None, from_date=None, to_date=None, company=None, route=None):
     """Get customer visit history for the logged-in salesperson.
 
-    company: optional — when provided, only returns visits stamped with this
-    company (visits recorded before multi-company rollout have no company
-    field and are returned unconditionally).
+    Query params:
+        customer: optional — filter to a single customer
+        route: optional — filter to customers belonging to this route
+               (Customer.custom_route = route)
+        from_date / to_date: visit creation date range
+        company: optional — when provided, only returns visits stamped with this
+                 company. Legacy visits without `company` are returned
+                 unconditionally.
+
+    Per-visit response fields:
+        customer, customer_name, customer_address, route,
+        visit_date, visit_time, latitude, longitude,
+        remarks, notes (alias of remarks), purpose_of_visit,
+        sales_person, company, creation
     """
     try:
         sales_person = frappe.db.get_value("Sales Person", {"custom_user": frappe.session.user}, "name")
@@ -9707,16 +9721,74 @@ def get_customer_visits(customer=None, from_date=None, to_date=None, company=Non
         start = from_date or today
         end = to_date or today
 
-        visits = frappe.db.sql("""
+        # Optional customer filter
+        # Optional route filter — find customers belonging to that route, then
+        # restrict the visit query to those.
+        conditions = [
+            "c.comment_type = 'Info'",
+            "c.reference_doctype = 'Customer'",
+            "c.comment_email = %s",
+            "c.content LIKE '%%customer_visit%%'",
+            "DATE(c.creation) BETWEEN %s AND %s",
+        ]
+        values = [frappe.session.user, start, end]
+
+        if customer:
+            conditions.append("c.reference_name = %s")
+            values.append(customer)
+
+        if route:
+            route_customers = frappe.get_all("Customer", filters={"custom_route": route}, pluck="name")
+            if not route_customers:
+                return response("Customer visits fetched", {
+                    "visits": [], "visited_count": 0, "visited_customers": [],
+                }, True, 200)
+            _ph = ",".join(["%s"] * len(route_customers))
+            conditions.append(f"c.reference_name IN ({_ph})")
+            values.extend(route_customers)
+
+        where_clause = " AND ".join(conditions)
+        visits = frappe.db.sql(f"""
             SELECT c.reference_name as customer, c.content, c.creation
             FROM `tabComment` c
-            WHERE c.comment_type = 'Info'
-            AND c.reference_doctype = 'Customer'
-            AND c.comment_email = %s
-            AND c.content LIKE '%%customer_visit%%'
-            AND DATE(c.creation) BETWEEN %s AND %s
+            WHERE {where_clause}
             ORDER BY c.creation DESC
-        """, (frappe.session.user, start, end), as_dict=True)
+        """, tuple(values), as_dict=True)
+
+        # Resolve customer-level metadata in batch (customer_name, route, address)
+        customer_names_set = list({(v.get("customer") if isinstance(v, dict) else v.customer) for v in visits if (v.get("customer") if isinstance(v, dict) else v.customer)})
+        customer_meta = {}
+        if customer_names_set:
+            for c_row in frappe.get_all(
+                "Customer",
+                filters={"name": ["in", customer_names_set]},
+                fields=["name", "customer_name", "custom_route"],
+            ):
+                customer_meta[c_row["name"]] = {
+                    "customer_name": c_row.get("customer_name"),
+                    "route": c_row.get("custom_route"),
+                }
+            # Primary address per customer (Dynamic Link → Address)
+            addr_rows = frappe.db.sql(
+                f"""
+                SELECT dl.link_name AS customer, a.address_line1, a.address_line2,
+                       a.city, a.state, a.pincode, a.country
+                FROM `tabDynamic Link` dl
+                JOIN `tabAddress` a ON a.name = dl.parent
+                WHERE dl.link_doctype = 'Customer'
+                  AND dl.parenttype = 'Address'
+                  AND dl.link_name IN ({",".join(["%s"] * len(customer_names_set))})
+                """,
+                tuple(customer_names_set),
+                as_dict=True,
+            )
+            seen_addr = set()
+            for ar in addr_rows:
+                if ar["customer"] in seen_addr:
+                    continue
+                seen_addr.add(ar["customer"])
+                parts = [ar.get("address_line1"), ar.get("address_line2"), ar.get("city"), ar.get("state"), ar.get("pincode"), ar.get("country")]
+                customer_meta.setdefault(ar["customer"], {})["customer_address"] = ", ".join([p for p in parts if p])
 
         result = []
         for v in visits:
@@ -9730,8 +9802,20 @@ def get_customer_visits(customer=None, from_date=None, to_date=None, company=Non
                         continue
                 elif _allowed_companies and visit_company and visit_company not in _allowed_companies:
                     continue
-                data["customer"] = v.reference_name
-                data["customer_name"] = frappe.db.get_value("Customer", v.reference_name, "customer_name")
+                # The SQL aliases reference_name AS `customer` — use that key
+                # (the previous code used v.reference_name which doesn't exist
+                # and silently produced None / empty customer_name).
+                cust_name = v.get("customer") if isinstance(v, dict) else v.customer
+                meta = customer_meta.get(cust_name, {})
+                data["customer"] = cust_name
+                data["customer_name"] = meta.get("customer_name") or ""
+                data["customer_address"] = meta.get("customer_address")
+                data["route"] = meta.get("route")
+                # Expose remarks as `notes` (kept `remarks` too for back-compat)
+                data["notes"] = data.get("remarks", "") or ""
+                # Ensure `purpose_of_visit` is always present (legacy rows
+                # recorded before this field was added → empty string).
+                data["purpose_of_visit"] = data.get("purpose_of_visit", "") or ""
                 data["creation"] = str(v.creation)
                 result.append(data)
             except Exception:
