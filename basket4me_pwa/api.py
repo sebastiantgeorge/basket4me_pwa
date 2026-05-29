@@ -3225,6 +3225,35 @@ def create_customer(params):
             customer_doc.mobile_no = customerdetails.get('mobile_no')
             customer_doc.email_id = customerdetails.get('email')
 
+            # ── New fields (all optional, only set when provided + column exists) ──
+            # customer_type: standard ERPNext Select (Individual / Company / etc.)
+            if customerdetails.get('customer_type') and hasattr(customer_doc, 'customer_type'):
+                customer_doc.customer_type = customerdetails['customer_type']
+            # tax_category: standard ERPNext Link to Tax Category
+            if customerdetails.get('tax_category') and hasattr(customer_doc, 'tax_category'):
+                customer_doc.tax_category = customerdetails['tax_category']
+            # gst_category: regional (India) Link to GST Category
+            if customerdetails.get('gst_category') and hasattr(customer_doc, 'gst_category'):
+                customer_doc.gst_category = customerdetails['gst_category']
+            # gst_no: ERPNext stores GSTIN as gstin on Customer or tax_id; set both if columns exist
+            _gst_no = customerdetails.get('gst_no')
+            if _gst_no:
+                if hasattr(customer_doc, 'gstin'):
+                    customer_doc.gstin = _gst_no
+                if not customer_doc.tax_id and hasattr(customer_doc, 'tax_id'):
+                    customer_doc.tax_id = _gst_no
+            # Custom fields — guarded with has_column so missing columns don't crash insert
+            for src, target in [
+                ('customer_route', 'custom_route'),
+                ('customer_category', 'custom_customer_category'),
+                ('latitude', 'custom_latitude'),
+                ('longitude', 'custom_longitude'),
+                ('route_sequence', 'custom_route_sequence'),
+            ]:
+                val = customerdetails.get(src)
+                if val is not None and val != "" and frappe.db.has_column("Customer", target):
+                    setattr(customer_doc, target, val)
+
             if customerdetails.get('value'):
                 customer_doc.append("custom_additional_ids", {
                     "type_name": "Commercial Registration Number",
@@ -3235,11 +3264,41 @@ def create_customer(params):
             if sales_person:
                 customer_doc.append("sales_team", {
                     "sales_person": sales_person,
-                    "allocated_percentage": 100  
+                    "allocated_percentage": 100
                 })
-                
+
             customer_doc.flags.ignore_permissions = True
             customer_doc.save()
+
+            # ── contact_person: create a Contact and link it as primary ──
+            cp = customerdetails.get('contact_person')
+            if cp:
+                try:
+                    contact_doc = frappe.new_doc("Contact")
+                    # Accept either string ("John Doe") or dict ({"first_name", "last_name", "email", "mobile_no"})
+                    if isinstance(cp, str):
+                        parts = cp.strip().split(maxsplit=1)
+                        contact_doc.first_name = parts[0]
+                        if len(parts) > 1:
+                            contact_doc.last_name = parts[1]
+                    elif isinstance(cp, dict):
+                        contact_doc.first_name = cp.get('first_name') or (cp.get('name') or "").split(maxsplit=1)[0]
+                        contact_doc.last_name = cp.get('last_name') or ""
+                        if cp.get('email'):
+                            contact_doc.append("email_ids", {"email_id": cp['email'], "is_primary": 1})
+                        if cp.get('mobile_no'):
+                            contact_doc.append("phone_nos", {"phone": cp['mobile_no'], "is_primary_mobile_no": 1})
+                    contact_doc.append("links", {
+                        "link_doctype": "Customer",
+                        "link_name": customer_doc.name,
+                    })
+                    contact_doc.flags.ignore_permissions = True
+                    contact_doc.insert(ignore_permissions=True)
+                    # Set as primary contact
+                    if hasattr(customer_doc, 'customer_primary_contact'):
+                        frappe.db.set_value("Customer", customer_doc.name, "customer_primary_contact", contact_doc.name)
+                except Exception:
+                    frappe.log_error(frappe.get_traceback(), "create_customer contact_person insert failed (continuing)")
 
             # Check if address details exist before creating Address
             customerdetails_address = customerdetails.get('address')
@@ -3280,7 +3339,232 @@ def create_customer(params):
         return response(str(exception), {}, False, 417)
 
 
-    
+@frappe.whitelist(methods="POST")
+def update_customer(params):
+    """Update an existing Customer.
+
+    Args (via params dict):
+        name: Customer doc name (required)
+        customerdetails: same shape as create_customer.customerdetails — any
+            subset of fields. Only provided keys are written.
+
+    Updatable keys (skipped silently if column missing on this site):
+        customer_name, custom_customer_name_in_arabic, customer_group,
+        tax_id, custom_vat_registration_number, mobile_no, email (→ email_id),
+        customer_type, tax_category, gst_category, gst_no (→ gstin / tax_id),
+        customer_route → custom_route, customer_category → custom_customer_category,
+        latitude → custom_latitude, longitude → custom_longitude,
+        route_sequence → custom_route_sequence,
+        contact_person — creates/updates a Contact linked to the customer,
+        address — updates the primary linked Address (creates if absent).
+    """
+    try:
+        if isinstance(params, str):
+            params = json.loads(params)
+
+        name = params.get("name") or params.get("customer")
+        if not name:
+            return response("Customer name is required", {}, False, 400)
+        if not frappe.db.exists("Customer", name):
+            return response(f"Customer '{name}' not found", {}, False, 404)
+
+        details = params.get("customerdetails") or params
+        customer_doc = frappe.get_doc("Customer", name)
+
+        # Simple scalar fields
+        _scalars = {
+            "customer_name": "customer_name",
+            "custom_customer_name_in_arabic": "custom_customer_name_in_arabic",
+            "customer_group": "customer_group",
+            "tax_id": "tax_id",
+            "custom_vat_registration_number": "custom_vat_registration_number",
+            "mobile_no": "mobile_no",
+            "email": "email_id",
+            "customer_type": "customer_type",
+            "tax_category": "tax_category",
+            "gst_category": "gst_category",
+        }
+        for src, target in _scalars.items():
+            if src in details and details[src] is not None:
+                if hasattr(customer_doc, target):
+                    setattr(customer_doc, target, details[src])
+
+        # gst_no — write both gstin and tax_id if provided
+        if details.get("gst_no"):
+            if hasattr(customer_doc, "gstin"):
+                customer_doc.gstin = details["gst_no"]
+            if hasattr(customer_doc, "tax_id"):
+                customer_doc.tax_id = details["gst_no"]
+
+        # Custom fields (has_column guarded)
+        for src, target in [
+            ("customer_route", "custom_route"),
+            ("customer_category", "custom_customer_category"),
+            ("latitude", "custom_latitude"),
+            ("longitude", "custom_longitude"),
+            ("route_sequence", "custom_route_sequence"),
+        ]:
+            if src in details and details[src] is not None and frappe.db.has_column("Customer", target):
+                setattr(customer_doc, target, details[src])
+
+        customer_doc.flags.ignore_permissions = True
+        customer_doc.save(ignore_permissions=True)
+
+        # ── contact_person: upsert a primary Contact ──
+        cp = details.get("contact_person")
+        if cp:
+            try:
+                primary = frappe.db.get_value("Customer", customer_doc.name, "customer_primary_contact")
+                contact_doc = frappe.get_doc("Contact", primary) if primary and frappe.db.exists("Contact", primary) else frappe.new_doc("Contact")
+                if isinstance(cp, str):
+                    parts = cp.strip().split(maxsplit=1)
+                    contact_doc.first_name = parts[0]
+                    contact_doc.last_name = parts[1] if len(parts) > 1 else ""
+                elif isinstance(cp, dict):
+                    contact_doc.first_name = cp.get("first_name") or (cp.get("name") or "").split(maxsplit=1)[0]
+                    contact_doc.last_name = cp.get("last_name") or ""
+                    if cp.get("email"):
+                        contact_doc.email_ids = []
+                        contact_doc.append("email_ids", {"email_id": cp["email"], "is_primary": 1})
+                    if cp.get("mobile_no"):
+                        contact_doc.phone_nos = []
+                        contact_doc.append("phone_nos", {"phone": cp["mobile_no"], "is_primary_mobile_no": 1})
+                # Ensure link to this customer is present
+                has_link = any(
+                    (getattr(l, "link_doctype", None) == "Customer" and getattr(l, "link_name", None) == customer_doc.name)
+                    for l in (contact_doc.links or [])
+                )
+                if not has_link:
+                    contact_doc.append("links", {"link_doctype": "Customer", "link_name": customer_doc.name})
+                contact_doc.flags.ignore_permissions = True
+                if contact_doc.get("name"):
+                    contact_doc.save(ignore_permissions=True)
+                else:
+                    contact_doc.insert(ignore_permissions=True)
+                if hasattr(customer_doc, "customer_primary_contact"):
+                    frappe.db.set_value("Customer", customer_doc.name, "customer_primary_contact", contact_doc.name)
+            except Exception:
+                frappe.log_error(frappe.get_traceback(), "update_customer contact_person upsert failed (continuing)")
+
+        # ── address: upsert the primary linked Address ──
+        addr = details.get("address")
+        if addr and isinstance(addr, dict):
+            try:
+                addr_name = frappe.db.get_value(
+                    "Dynamic Link",
+                    {"link_doctype": "Customer", "link_name": customer_doc.name, "parenttype": "Address"},
+                    "parent",
+                )
+                if addr_name:
+                    addr_doc = frappe.get_doc("Address", addr_name)
+                else:
+                    addr_doc = frappe.new_doc("Address")
+                    addr_doc.address_title = customer_doc.customer_name
+                    addr_doc.address_type = "Billing"
+                    addr_doc.append("links", {"link_doctype": "Customer", "link_name": customer_doc.name})
+                    addr_doc.is_primary_address = 1
+                # Map fields (only set when provided)
+                _addr_map = {
+                    "addressline_1": "address_line1",
+                    "addressline_2": "address_line2",
+                    "city": "city",
+                    "state": "state",
+                    "pincode": "pincode",
+                    "country": "country",
+                    "custom_building_number": "custom_building_number",
+                    "custom_area": "custom_area",
+                }
+                for src, target in _addr_map.items():
+                    if src in addr and addr[src] is not None and hasattr(addr_doc, target):
+                        setattr(addr_doc, target, addr[src])
+                addr_doc.flags.ignore_permissions = True
+                if addr_doc.get("name"):
+                    addr_doc.save(ignore_permissions=True)
+                else:
+                    addr_doc.insert(ignore_permissions=True)
+            except Exception:
+                frappe.log_error(frappe.get_traceback(), "update_customer address upsert failed (continuing)")
+
+        frappe.db.commit()
+        return response("Customer updated", {
+            "name": customer_doc.name,
+            "customer_name": customer_doc.customer_name,
+        }, True, 200)
+
+    except Exception as exception:
+        frappe.db.rollback()
+        frappe.log_error(frappe.get_traceback(), "update_customer error")
+        return response(str(exception), {}, False, 417)
+
+
+# ============================================================================
+# Customer master data lookups
+# ============================================================================
+
+@frappe.whitelist(methods="GET")
+def get_customer_types():
+    """Return the Select options on Customer.customer_type. Standard ERPNext
+    ships with Individual / Company / etc. — read the actual options live
+    so this stays accurate if customised."""
+    try:
+        meta = frappe.get_meta("Customer")
+        field = meta.get_field("customer_type")
+        opts = []
+        if field and field.options:
+            opts = [o for o in field.options.split("\n") if o.strip()]
+        return response("Customer types", {"types": opts}, True, 200)
+    except Exception as e:
+        frappe.log_error(frappe.get_traceback(), "get_customer_types error")
+        return response(str(e), {}, False, 500)
+
+
+@frappe.whitelist(methods="GET")
+def get_customer_categories(name=None):
+    """List Customer Categories (custom doctype on this app). Returns [] if
+    the doctype isn't installed on the site."""
+    try:
+        if not frappe.db.exists("DocType", "Customer Category"):
+            return response("Customer categories", {"categories": []}, True, 200)
+        filters = {}
+        if name:
+            filters["name"] = ["like", f"%{name}%"]
+        rows = frappe.get_all("Customer Category", filters=filters, fields=["name"], order_by="name asc")
+        return response("Customer categories", {"categories": rows}, True, 200)
+    except Exception as e:
+        frappe.log_error(frappe.get_traceback(), "get_customer_categories error")
+        return response(str(e), {}, False, 500)
+
+
+@frappe.whitelist(methods="GET")
+def get_tax_categories(name=None):
+    """List ERPNext Tax Categories."""
+    try:
+        filters = {}
+        if name:
+            filters["name"] = ["like", f"%{name}%"]
+        rows = frappe.get_all("Tax Category", filters=filters, fields=["name"], order_by="name asc")
+        return response("Tax categories", {"categories": rows}, True, 200)
+    except Exception as e:
+        frappe.log_error(frappe.get_traceback(), "get_tax_categories error")
+        return response(str(e), {}, False, 500)
+
+
+@frappe.whitelist(methods="GET")
+def get_gst_categories():
+    """Return the Select options on Customer.gst_category (India regional).
+    Returns [] if the field isn't on this site."""
+    try:
+        meta = frappe.get_meta("Customer")
+        field = meta.get_field("gst_category") if meta.has_field("gst_category") else None
+        opts = []
+        if field and field.options:
+            opts = [o for o in field.options.split("\n") if o.strip()]
+        return response("GST categories", {"categories": opts}, True, 200)
+    except Exception as e:
+        frappe.log_error(frappe.get_traceback(), "get_gst_categories error")
+        return response(str(e), {}, False, 500)
+
+
 @frappe.whitelist(methods="POST")
 def create_sales_invoice(params):
     try:
@@ -9665,7 +9949,10 @@ def mark_customer_visit(params):
                 "visit_time": frappe.utils.now_datetime().strftime("%H:%M:%S"),
                 "latitude": params.get("latitude"),
                 "longitude": params.get("longitude"),
-                "remarks": params.get("remarks", ""),
+                # Accept either `notes` (new contract) or `remarks` (legacy).
+                # Stored as both so old readers and new readers both see the value.
+                "remarks": params.get("notes") or params.get("remarks") or "",
+                "notes": params.get("notes") or params.get("remarks") or "",
                 "purpose_of_visit": params.get("purpose_of_visit", ""),
             }),
             "comment_email": frappe.session.user,
