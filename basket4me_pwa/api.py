@@ -3126,17 +3126,99 @@ def get_customer_detail(customer=None):
         if not customer:
             return response("Customer is missing", {}, False, 400)
 
+        # Build field list dynamically so missing custom columns don't crash.
+        # Mirrors every field create_customer accepts (commit b29092a).
+        _fields = ["name", "customer_name", "tax_id", "customer_group", "territory", "mobile_no", "email_id"]
+        _optional_cols = [
+            "customer_type", "tax_category", "gst_category", "gstin",
+            "custom_vat_registration_number", "custom_customer_name_in_arabic",
+            "customer_primary_contact", "customer_primary_address",
+            "default_price_list",
+            # Custom (Basket4Me) — names map back to create_customer input keys
+            "custom_route", "custom_customer_category", "custom_latitude",
+            "custom_longitude", "custom_route_sequence",
+        ]
+        for c in _optional_cols:
+            if frappe.db.has_column("Customer", c):
+                _fields.append(c)
+
         customer_details = frappe.db.get_value(
-            "Customer",
-            customer,
-            ["name", "customer_name", "tax_id", "customer_group", "territory", "mobile_no"],
-            as_dict=True
+            "Customer", customer, _fields, as_dict=True,
         )
 
         if not customer_details:
             return response(f"Customer '{customer}' not found", {}, False, 404)
 
-        # Addresses
+        # ── Alias custom_* columns back to the input-key names create_customer uses ──
+        # (callers pass `customer_route`; we stored it as `custom_route` — return both)
+        for src, alias in [
+            ("custom_route", "customer_route"),
+            ("custom_customer_category", "customer_category"),
+            ("custom_latitude", "latitude"),
+            ("custom_longitude", "longitude"),
+            ("custom_route_sequence", "route_sequence"),
+        ]:
+            if src in customer_details:
+                customer_details[alias] = customer_details.get(src)
+
+        # email alias (create_customer accepts `email` → email_id)
+        if customer_details.get("email_id") and "email" not in customer_details:
+            customer_details["email"] = customer_details["email_id"]
+
+        # gst_no — set from gstin first, fall back to tax_id (regional builds vary)
+        customer_details["gst_no"] = customer_details.get("gstin") or customer_details.get("tax_id")
+
+        # ── Commercial Registration Number (CRN) from custom_additional_ids child table ──
+        # create_customer.append("custom_additional_ids", {type_code: "CRN", value: <value>})
+        customer_details["value"] = None
+        if frappe.db.has_column("Customer Additional Id", "type_code") \
+                or frappe.db.exists("DocType", "Customer Additional Id"):
+            try:
+                crn_row = frappe.db.sql(
+                    """
+                    SELECT value FROM `tabCustomer Additional Id`
+                    WHERE parent = %s AND parenttype = 'Customer' AND type_code = 'CRN'
+                    LIMIT 1
+                    """,
+                    customer, as_dict=True,
+                )
+                if crn_row:
+                    customer_details["value"] = crn_row[0].get("value")
+            except Exception:
+                pass
+
+        # ── contact_person — resolve the primary Contact (created by create_customer) ──
+        customer_details["contact_person"] = None
+        cpc = customer_details.get("customer_primary_contact")
+        if cpc:
+            try:
+                contact = frappe.db.get_value(
+                    "Contact", cpc,
+                    ["first_name", "last_name", "email_id", "mobile_no", "full_name"],
+                    as_dict=True,
+                )
+                if contact:
+                    customer_details["contact_person"] = {
+                        "name": contact.get("full_name") or " ".join(filter(None, [contact.get("first_name"), contact.get("last_name")])).strip(),
+                        "first_name": contact.get("first_name"),
+                        "last_name": contact.get("last_name"),
+                        "email": contact.get("email_id"),
+                        "mobile_no": contact.get("mobile_no"),
+                    }
+            except Exception:
+                pass
+
+        # Sales Team — useful for the picker / multi-company UI
+        try:
+            customer_details["sales_team"] = frappe.get_all(
+                "Sales Team",
+                filters={"parent": customer, "parenttype": "Customer"},
+                fields=["sales_person", "allocated_percentage"],
+            )
+        except Exception:
+            customer_details["sales_team"] = []
+
+        # Addresses (full set + primary flagged in same shape as create_customer body)
         address_list = frappe.get_all(
             "Dynamic Link",
             filters={
@@ -3148,21 +3230,34 @@ def get_customer_detail(customer=None):
         )
 
         addresses = []
+        primary_address = None
         for address in address_list:
             address_doc = frappe.get_doc("Address", address["address"])
-            addresses.append({
+            entry = {
+                "name": address_doc.name,
                 "address_title": address_doc.address_title,
-                "address_line1": address_doc.address_line1,
-                "address_line2": address_doc.address_line2,
+                "address_type": getattr(address_doc, "address_type", None),
+                "addressline_1": address_doc.address_line1,  # create_customer body key
+                "addressline_2": address_doc.address_line2,  # create_customer body key
+                "address_line1": address_doc.address_line1,  # back-compat
+                "address_line2": address_doc.address_line2,  # back-compat
+                "custom_building_number": getattr(address_doc, "custom_building_number", None),
+                "custom_area": getattr(address_doc, "custom_area", None),
                 "city": address_doc.city,
                 "state": address_doc.state,
                 "country": address_doc.country,
                 "pincode": address_doc.pincode,
                 "phone": address_doc.phone,
                 "email_id": address_doc.email_id,
-            })
+                "is_primary_address": getattr(address_doc, "is_primary_address", 0) or 0,
+            }
+            addresses.append(entry)
+            if entry["is_primary_address"] and not primary_address:
+                primary_address = entry
 
         customer_details["addresses"] = addresses
+        # Mirror create_customer's `address` (singular) — the primary, or first found
+        customer_details["address"] = primary_address or (addresses[0] if addresses else None)
 
         # Credit Limit (from Customer Credit Limit child table)
         credit_limit = frappe.db.get_value(
