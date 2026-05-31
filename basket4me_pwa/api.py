@@ -3170,13 +3170,24 @@ def get_customer_detail(customer=None):
 
         # ── Commercial Registration Number (CRN) from custom_additional_ids child table ──
         # create_customer.append("custom_additional_ids", {type_code: "CRN", value: <value>})
+        # The child doctype name varies by ERPNext build — wrap entire lookup in
+        # try/except so a missing/renamed doctype never breaks the endpoint.
         customer_details["value"] = None
-        if frappe.db.has_column("Customer Additional Id", "type_code") \
-                or frappe.db.exists("DocType", "Customer Additional Id"):
+        try:
+            # Discover the linked child doctype via Customer's meta
+            child_doctype = None
             try:
+                meta = frappe.get_meta("Customer")
+                for df in meta.fields:
+                    if df.fieldname == "custom_additional_ids" and df.fieldtype == "Table":
+                        child_doctype = df.options
+                        break
+            except Exception:
+                pass
+            if child_doctype and frappe.db.table_exists(child_doctype) and frappe.db.has_column(child_doctype, "type_code"):
                 crn_row = frappe.db.sql(
-                    """
-                    SELECT value FROM `tabCustomer Additional Id`
+                    f"""
+                    SELECT value FROM `tab{child_doctype}`
                     WHERE parent = %s AND parenttype = 'Customer' AND type_code = 'CRN'
                     LIMIT 1
                     """,
@@ -3184,8 +3195,9 @@ def get_customer_detail(customer=None):
                 )
                 if crn_row:
                     customer_details["value"] = crn_row[0].get("value")
-            except Exception:
-                pass
+        except Exception:
+            # Any failure here is non-fatal — value stays None
+            pass
 
         # ── contact_person — resolve the primary Contact (created by create_customer) ──
         customer_details["contact_person"] = None
