@@ -3350,6 +3350,7 @@ def create_customer(params):
                 if not customer_doc.tax_id and hasattr(customer_doc, 'tax_id'):
                     customer_doc.tax_id = _gst_no
             # Custom fields — guarded with has_column so missing columns don't crash insert
+            _skipped_custom = []
             for src, target in [
                 ('customer_route', 'custom_route'),
                 ('customer_category', 'custom_customer_category'),
@@ -3358,8 +3359,25 @@ def create_customer(params):
                 ('route_sequence', 'custom_route_sequence'),
             ]:
                 val = customerdetails.get(src)
-                if val is not None and val != "" and frappe.db.has_column("Customer", target):
+                if val is None or val == "":
+                    continue
+                if frappe.db.has_column("Customer", target):
+                    if src in ("latitude", "longitude"):
+                        try:
+                            val = float(val)
+                        except (TypeError, ValueError):
+                            pass
                     setattr(customer_doc, target, val)
+                else:
+                    _skipped_custom.append(f"{src} → {target}")
+            if _skipped_custom:
+                frappe.log_error(
+                    title="create_customer: custom columns missing",
+                    message=(
+                        f"Customer {customerdetails.get('name')}: skipped writes for missing custom columns: "
+                        f"{', '.join(_skipped_custom)}. Run `bench migrate` to install fixtures."
+                    ),
+                )
 
             if customerdetails.get('value'):
                 customer_doc.append("custom_additional_ids", {
@@ -3503,7 +3521,9 @@ def update_customer(params):
             if hasattr(customer_doc, "tax_id"):
                 customer_doc.tax_id = details["gst_no"]
 
-        # Custom fields (has_column guarded)
+        # Custom fields (has_column guarded — log a warning when the column
+        # is missing so debugging "field not saving" isn't silent).
+        _skipped_custom = []
         for src, target in [
             ("customer_route", "custom_route"),
             ("customer_category", "custom_customer_category"),
@@ -3511,8 +3531,29 @@ def update_customer(params):
             ("longitude", "custom_longitude"),
             ("route_sequence", "custom_route_sequence"),
         ]:
-            if src in details and details[src] is not None and frappe.db.has_column("Customer", target):
-                setattr(customer_doc, target, details[src])
+            if src not in details or details[src] is None:
+                continue
+            if frappe.db.has_column("Customer", target):
+                # Cast lat/long to float so '9.7098' string from JSON form
+                # data is stored as a number (the field is Float).
+                _val = details[src]
+                if src in ("latitude", "longitude"):
+                    try:
+                        _val = float(_val)
+                    except (TypeError, ValueError):
+                        pass
+                setattr(customer_doc, target, _val)
+            else:
+                _skipped_custom.append(f"{src} → {target}")
+
+        if _skipped_custom:
+            frappe.log_error(
+                title="update_customer: custom columns missing",
+                message=(
+                    f"Customer {customer_doc.name}: skipped writes for missing custom columns: "
+                    f"{', '.join(_skipped_custom)}. Run `bench migrate` to install fixtures."
+                ),
+            )
 
         customer_doc.flags.ignore_permissions = True
         customer_doc.save(ignore_permissions=True)
