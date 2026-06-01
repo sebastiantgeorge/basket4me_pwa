@@ -3555,8 +3555,47 @@ def update_customer(params):
                 ),
             )
 
+        # Bypass strict validation so a partial update (e.g. only latitude /
+        # longitude) doesn't fail because of pre-existing empty mandatory
+        # fields on the Customer (mobile_no, etc) or stale link refs.
         customer_doc.flags.ignore_permissions = True
-        customer_doc.save(ignore_permissions=True)
+        customer_doc.flags.ignore_mandatory = True
+        customer_doc.flags.ignore_validate = True
+        customer_doc.flags.ignore_links = True
+        try:
+            customer_doc.save(ignore_permissions=True)
+        except frappe.MandatoryError as me:
+            # Last-resort fallback: write only the changed scalar/custom
+            # columns directly via db.set_value so a single missing
+            # mandatory field doesn't block a partial update.
+            frappe.log_error(
+                title="update_customer: MandatoryError - falling back to db.set_value",
+                message=str(me),
+            )
+            for src, target in _scalars.items():
+                if src in details and details[src] is not None and frappe.db.has_column("Customer", target):
+                    frappe.db.set_value("Customer", customer_doc.name, target, details[src], update_modified=True)
+            if details.get("gst_no"):
+                if frappe.db.has_column("Customer", "gstin"):
+                    frappe.db.set_value("Customer", customer_doc.name, "gstin", details["gst_no"], update_modified=True)
+                if frappe.db.has_column("Customer", "tax_id"):
+                    frappe.db.set_value("Customer", customer_doc.name, "tax_id", details["gst_no"], update_modified=True)
+            for src, target in [
+                ("customer_route", "custom_route"),
+                ("customer_category", "custom_customer_category"),
+                ("latitude", "custom_latitude"),
+                ("longitude", "custom_longitude"),
+                ("route_sequence", "custom_route_sequence"),
+            ]:
+                if src in details and details[src] is not None and frappe.db.has_column("Customer", target):
+                    val = details[src]
+                    if src in ("latitude", "longitude"):
+                        try:
+                            val = float(val)
+                        except (TypeError, ValueError):
+                            pass
+                    frappe.db.set_value("Customer", customer_doc.name, target, val, update_modified=True)
+            frappe.db.commit()
 
         # ── contact_person: upsert a primary Contact ──
         cp = details.get("contact_person")
