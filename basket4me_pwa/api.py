@@ -3487,13 +3487,38 @@ def update_customer(params):
         if isinstance(params, str):
             params = json.loads(params)
 
-        name = params.get("name") or params.get("customer")
-        if not name:
-            return response("Customer name is required", {}, False, 400)
-        if not frappe.db.exists("Customer", name):
-            return response(f"Customer '{name}' not found", {}, False, 404)
+        # Resolve the target Customer doc. Accept any of:
+        #   params.name, params.customer          (preferred — doc name)
+        #   params.customerdetails.name           (mirrors create_customer body)
+        #   params.customerdetails.customer_name  (display name)
+        # If the supplied value is not a Customer doc name, fall back to a
+        # customer_name lookup so callers can identify by display name.
+        details = params.get("customerdetails") or {}
+        if not isinstance(details, dict):
+            details = {}
 
-        details = params.get("customerdetails") or params
+        candidate = (
+            params.get("name")
+            or params.get("customer")
+            or details.get("name")
+            or details.get("customer_name")
+        )
+        if not candidate:
+            return response("Customer name is required", {}, False, 400)
+
+        name = None
+        if frappe.db.exists("Customer", candidate):
+            name = candidate
+        else:
+            # Try matching by display customer_name
+            name = frappe.db.get_value("Customer", {"customer_name": candidate}, "name")
+            if not name:
+                return response(f"Customer '{candidate}' not found", {}, False, 404)
+
+        # Merge: prefer customerdetails for field values, fall back to top-level params
+        if not details:
+            details = params
+
         customer_doc = frappe.get_doc("Customer", name)
 
         # Simple scalar fields
