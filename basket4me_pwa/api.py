@@ -4487,7 +4487,12 @@ def delete_sales_invoice(params):
 @frappe.whitelist(methods=["GET", "POST"])
 def get_print_pdf(doctype=None, name=None, print_format=None, letterhead=None):
     """Simple print endpoint that returns base64-encoded PDF or HTML fallback.
-    Uses frappe.get_print() which is the most reliable print method."""
+    Uses frappe.get_print() which is the most reliable print method.
+
+    Robust to incomplete Print Formats: if the requested format has no
+    content (empty format_data + no html + no print_designer_body), the
+    endpoint falls back to "Standard" so the caller still gets a printable
+    document instead of a 417 from `json.loads(None)` inside Frappe."""
     try:
         if not doctype or not name:
             return response("doctype and name are required", {}, False, 400)
@@ -4498,6 +4503,46 @@ def get_print_pdf(doctype=None, name=None, print_format=None, letterhead=None):
         if not print_format:
             print_format = "Standard"
 
+        # ── Validate the requested Print Format has renderable content ──
+        # Frappe v14+ crashes with `json.loads(None)` (the exact error this
+        # endpoint was hitting for "Pending Sales Order") when format_data
+        # is null AND the format also has no html / print_designer_body.
+        # Pre-flight check + fallback to Standard, with the chosen format
+        # echoed in the response so the caller can warn the admin.
+        used_fallback = False
+        fallback_reason = None
+        if print_format and print_format != "Standard":
+            try:
+                pf_meta = frappe.db.get_value(
+                    "Print Format", print_format,
+                    ["html", "format_data", "print_designer", "print_designer_body"],
+                    as_dict=True,
+                )
+                if not pf_meta:
+                    used_fallback = True
+                    fallback_reason = f"Print Format '{print_format}' does not exist"
+                else:
+                    has_content = bool(
+                        pf_meta.get("html")
+                        or pf_meta.get("format_data")
+                        or (pf_meta.get("print_designer") and pf_meta.get("print_designer_body"))
+                    )
+                    if not has_content:
+                        used_fallback = True
+                        fallback_reason = (
+                            f"Print Format '{print_format}' has no content "
+                            "(empty format_data / html / print_designer_body) — falling back to Standard"
+                        )
+                if used_fallback:
+                    frappe.log_error(
+                        title="get_print_pdf: print format fallback",
+                        message=fallback_reason or "",
+                    )
+                    print_format = "Standard"
+            except Exception:
+                # If the validation itself fails, let frappe.get_print decide
+                pass
+
         # Generate print HTML (always works)
         # Basket4Me users may lack direct read permission — bypass for print
         frappe.flags.ignore_permissions = True
@@ -4505,7 +4550,27 @@ def get_print_pdf(doctype=None, name=None, print_format=None, letterhead=None):
             kwargs = {"doctype": doctype, "name": name, "print_format": print_format}
             if letterhead is not None:
                 kwargs["letterhead"] = letterhead
-            html = frappe.get_print(**kwargs)
+            try:
+                html = frappe.get_print(**kwargs)
+            except (TypeError, ValueError) as render_err:
+                # Last-resort fallback for any other malformed Print Format
+                # whose render path raises json.loads(None) / similar — retry
+                # with Standard so the caller still gets something printable.
+                if print_format != "Standard":
+                    frappe.log_error(
+                        title="get_print_pdf: render error fallback",
+                        message=f"format='{print_format}': {render_err}",
+                    )
+                    used_fallback = True
+                    fallback_reason = (
+                        fallback_reason
+                        or f"Render of '{print_format}' failed: {render_err}. Retried with Standard."
+                    )
+                    print_format = "Standard"
+                    kwargs["print_format"] = "Standard"
+                    html = frappe.get_print(**kwargs)
+                else:
+                    raise
         finally:
             frappe.flags.ignore_permissions = False
 
@@ -4519,6 +4584,9 @@ def get_print_pdf(doctype=None, name=None, print_format=None, letterhead=None):
             "html": html,
             "content_type": "text/html",
         }
+        if used_fallback:
+            result["fallback_used"] = True
+            result["fallback_reason"] = fallback_reason
 
         # Also try PDF generation (requires wkhtmltopdf)
         try:
