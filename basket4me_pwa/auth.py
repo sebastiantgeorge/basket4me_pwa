@@ -310,36 +310,72 @@ def get_user_details(sid=None, user_id=None):
             except Exception:
                 pass
 
-        # Get doctype permissions for the user
-        doctypes_to_check = [
-            "Sales Order",
-            "Delivery Note",
-            "Sales Invoice",
-            "Payment Entry",
-            "Customer",
-            "Item",
-            "Material Request",
+        # ── Doctype permissions + default print formats ──
+        # Logical labels (what the frontend asks about) → underlying ERPNext doctype.
+        # "Sales Return" is a Sales Invoice with is_return=1, "Receipt" is a
+        # Payment Entry, "Customer Visit" is a Comment-based log on Customer.
+        doctype_aliases = [
+            ("Sales Order", "Sales Order"),
+            ("Delivery Note", "Delivery Note"),
+            ("Sales Invoice", "Sales Invoice"),
+            ("Sales Return", "Sales Invoice"),
+            ("Payment Entry", "Payment Entry"),
+            ("Receipt", "Payment Entry"),
+            ("Customer", "Customer"),
+            ("Customer Visit", "Customer"),  # visits are Comments on Customer
+            ("Item", "Item"),
+            ("Material Request", "Material Request"),
         ]
-        permissions = {}
-        for dt in doctypes_to_check:
+
+        # Frappe perm types — checked via has_permission, which doesn't require
+        # instantiating a new doc (the previous frappe.new_doc(dt) approach
+        # silently returned all-False when new_doc raised for users with
+        # incomplete defaults — e.g. aoneadmin@erp had all permissions=False).
+        _perm_types = ("read", "create", "write", "submit", "cancel", "delete", "amend", "print")
+
+        def _resolve_perms(target_doctype, current_user):
+            out = {p: False for p in _perm_types}
             try:
-                perm = frappe.permissions.get_doc_permissions(frappe.new_doc(dt), user=user_id)
-                permissions[dt] = {
-                    "read": bool(perm.get("read", 0)),
-                    "create": bool(perm.get("create", 0)),
-                    "write": bool(perm.get("write", 0)),
-                    "submit": bool(perm.get("submit", 0)),
-                    "cancel": bool(perm.get("cancel", 0)),
-                    "delete": bool(perm.get("delete", 0)),
-                    "amend": bool(perm.get("amend", 0)),
-                    "print": bool(perm.get("print", 0)),
-                }
+                for p in _perm_types:
+                    out[p] = bool(
+                        frappe.permissions.has_permission(
+                            target_doctype, ptype=p, user=current_user, raise_exception=False
+                        )
+                    )
             except Exception:
-                permissions[dt] = {
-                    "read": False, "create": False, "write": False,
-                    "submit": False, "cancel": False, "delete": False,
-                    "amend": False, "print": False,
-                }
+                pass
+            return out
+
+        permissions = {}
+        for label, target_dt in doctype_aliases:
+            permissions[label] = _resolve_perms(target_dt, user_id)
+
+        # Default print formats (per Frappe convention: DocType.default_print_format
+        # OR a Print Format row marked standard=Yes / default=1 for the doctype).
+        default_print_formats = {}
+        _print_format_targets = sorted({alias[1] for alias in doctype_aliases})
+        for target_dt in _print_format_targets:
+            pf = None
+            try:
+                pf = frappe.db.get_value("DocType", target_dt, "default_print_format")
+                if not pf:
+                    pf = frappe.db.get_value(
+                        "Print Format",
+                        {"doc_type": target_dt, "disabled": 0, "standard": "Yes"},
+                        "name",
+                    )
+                if not pf:
+                    pf = frappe.db.get_value(
+                        "Print Format", {"doc_type": target_dt, "disabled": 0}, "name"
+                    )
+            except Exception:
+                pass
+            default_print_formats[target_dt] = pf or None
+
+        # Expose under each logical label too, so the frontend can read
+        # default_print_formats['Sales Return'] without remapping.
+        for label, target_dt in doctype_aliases:
+            default_print_formats[label] = default_print_formats.get(target_dt)
 
         # Company bank details
         company_bank_name = None
@@ -385,6 +421,7 @@ def get_user_details(sid=None, user_id=None):
             "allow_negative_stock": _get_allow_negative_stock(company_name),
             "employee_id": frappe.get_value("Employee", {'user_id': user_doc.name}),
             "permissions": permissions,
+            "default_print_formats": default_print_formats,
         }
 
         frappe.local.response["message"] = {
