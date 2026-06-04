@@ -327,23 +327,55 @@ def get_user_details(sid=None, user_id=None):
             ("Material Request", "Material Request"),
         ]
 
-        # Frappe perm types — checked via has_permission, which doesn't require
-        # instantiating a new doc (the previous frappe.new_doc(dt) approach
-        # silently returned all-False when new_doc raised for users with
-        # incomplete defaults — e.g. aoneadmin@erp had all permissions=False).
+        # Frappe perm types. We compute role-based permission DIRECTLY from
+        # DocPerm + Custom DocPerm joined to the user's roles. This matches
+        # what the Role Permission Manager shows and what the Web List view's
+        # "+ New" button uses — and avoids `has_permission`'s False-without-
+        # doc behavior that was reporting all perms=False for aoneadmin/erp
+        # (a user who CAN create docs in the Web UI).
         _perm_types = ("read", "create", "write", "submit", "cancel", "delete", "amend", "print")
+
+        # Resolve the calling-target user's role set once (Frappe caches per
+        # process, but the get_user_details endpoint is allow_guest=True so
+        # the caller session may differ from user_id — call explicitly).
+        try:
+            _user_roles = set(frappe.get_roles(user_id) or [])
+        except Exception:
+            _user_roles = set()
+
+        # Build a per-doctype map of {ptype: set(role)} from DocPerm rows.
+        # permlevel=0 = the "main" form-level perms (which is what the Web
+        # list view uses to gate the + New button).
+        _perm_rows_cache = {}
+        def _role_set_for(doctype, ptype):
+            key = (doctype, ptype)
+            if key not in _perm_rows_cache:
+                try:
+                    rows = frappe.db.sql(
+                        f"""
+                        SELECT role FROM (
+                            SELECT role FROM `tabDocPerm`
+                            WHERE parent = %s AND `{ptype}` = 1 AND IFNULL(permlevel, 0) = 0
+                            UNION
+                            SELECT role FROM `tabCustom DocPerm`
+                            WHERE parent = %s AND `{ptype}` = 1 AND IFNULL(permlevel, 0) = 0
+                        ) p
+                        """,
+                        (doctype, doctype),
+                    )
+                    _perm_rows_cache[key] = {r[0] for r in rows if r and r[0]}
+                except Exception:
+                    _perm_rows_cache[key] = set()
+            return _perm_rows_cache[key]
 
         def _resolve_perms(target_doctype, current_user):
             out = {p: False for p in _perm_types}
-            try:
-                for p in _perm_types:
-                    out[p] = bool(
-                        frappe.permissions.has_permission(
-                            target_doctype, ptype=p, user=current_user, raise_exception=False
-                        )
-                    )
-            except Exception:
-                pass
+            if current_user == "Administrator":
+                return {p: True for p in _perm_types}
+            if not _user_roles:
+                return out
+            for p in _perm_types:
+                out[p] = bool(_user_roles & _role_set_for(target_doctype, p))
             return out
 
         permissions = {}
