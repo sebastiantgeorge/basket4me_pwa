@@ -382,23 +382,50 @@ def get_user_details(sid=None, user_id=None):
         for label, target_dt in doctype_aliases:
             permissions[label] = _resolve_perms(target_dt, user_id)
 
-        # Default print formats (per Frappe convention: DocType.default_print_format
-        # OR a Print Format row marked standard=Yes / default=1 for the doctype).
+        # Default print formats. ERPNext stores the desk's default print
+        # format as a Property Setter override (e.g. Sales Invoice's
+        # default = "Sales Invoice V3" is a Property Setter, NOT a write on
+        # tabDocType.default_print_format). Resolution chain:
+        #   1. Property Setter (doc_type=dt, property="default_print_format")
+        #      — the actual desk override mechanism
+        #   2. DocType.default_print_format — original field value (rare)
+        #   3. Print Format flagged default=1 for this doc_type
+        #   4. Any non-disabled, non-standard Print Format
+        #   5. Standard Print Format ("Standard" — the framework fallback)
         default_print_formats = {}
         _print_format_targets = sorted({alias[1] for alias in doctype_aliases})
         for target_dt in _print_format_targets:
             pf = None
             try:
-                pf = frappe.db.get_value("DocType", target_dt, "default_print_format")
+                # 1. Property Setter override (matches the desk's "Default" selection)
+                pf = frappe.db.get_value(
+                    "Property Setter",
+                    {"doc_type": target_dt, "property": "default_print_format"},
+                    "value",
+                )
+                # 2. Original DocType field value
+                if not pf:
+                    pf = frappe.db.get_value("DocType", target_dt, "default_print_format")
+                # 3. Print Format row marked default=1 (Frappe v14+)
+                if not pf and frappe.db.has_column("Print Format", "default"):
+                    pf = frappe.db.get_value(
+                        "Print Format",
+                        {"doc_type": target_dt, "disabled": 0, "default": 1},
+                        "name",
+                    )
+                # 4. Any non-disabled, non-standard Print Format (custom user format)
+                if not pf:
+                    pf = frappe.db.get_value(
+                        "Print Format",
+                        {"doc_type": target_dt, "disabled": 0, "standard": "No"},
+                        "name",
+                    )
+                # 5. Framework fallback — "Standard" (every doctype has this)
                 if not pf:
                     pf = frappe.db.get_value(
                         "Print Format",
                         {"doc_type": target_dt, "disabled": 0, "standard": "Yes"},
                         "name",
-                    )
-                if not pf:
-                    pf = frappe.db.get_value(
-                        "Print Format", {"doc_type": target_dt, "disabled": 0}, "name"
                     )
             except Exception:
                 pass
