@@ -2418,13 +2418,18 @@ def get_item_by_barcode(barcode=None):
 @frappe.whitelist(methods="GET")
 def get_item_list(name=None, item_name=None, customer=None, search=None,
                   page_number=1, page_size=20,
-                  limit_start=None, limit_page_length=None):
+                  limit_start=None, limit_page_length=None, company=None):
     """
     List enabled mobile-app items with pagination.
 
     Supports both pagination styles:
         page_number / page_size  (preferred)
         limit_start / limit_page_length  (legacy)
+
+    company: optional — scope to items that have stock (any Bin row) in
+        warehouses of the given company. Validated against the user's
+        allowed-companies set. When omitted on a multi-company user,
+        restricts to items in warehouses of any allowed company.
     """
     try:
         # Normalize pagination — page_number/page_size takes precedence unless legacy supplied
@@ -2434,10 +2439,64 @@ def get_item_list(name=None, item_name=None, customer=None, search=None,
         else:
             _offset = (int(page_number or 1) - 1) * _page_size
 
+        # Multi-company filter. Item has no native `company` column, so we
+        # restrict via the items present in warehouses of the given company
+        # (Bin → Warehouse.company). When no company filter applies, we use
+        # the original Frappe-ORM path for backward compatibility.
+        if company:
+            assert_company_allowed(company)
+        _allowed_companies = _get_user_companies(frappe.session.user) if frappe.session.user != "Administrator" else []
+
+        # Decide if we need the company-scoped path
+        _company_scoping = bool(company) or bool(_allowed_companies)
+
         filters = {"custom_allow_mobile_app": 1, "disabled": 0}
         fields = ['name', 'item_name', "description", "stock_uom", "has_batch_no"]
 
-        if name:
+        if _company_scoping:
+            # Build the WHERE clause + values for a raw-SQL query that
+            # restricts to items in warehouses of the resolved company set.
+            target_companies = [company] if company else _allowed_companies
+            _company_ph = ",".join(["%s"] * len(target_companies))
+
+            conditions = ["it.custom_allow_mobile_app = 1", "it.disabled = 0"]
+            conditions.append(f"""it.name IN (
+                SELECT DISTINCT b.item_code
+                FROM `tabBin` b
+                JOIN `tabWarehouse` w ON w.name = b.warehouse
+                WHERE w.company IN ({_company_ph})
+            )""")
+            values = list(target_companies)
+
+            if name:
+                conditions.append("(it.name LIKE %s OR it.name = %s)")
+                values.extend([f"%{name}%", name])
+            if item_name:
+                conditions.append("it.item_name LIKE %s")
+                values.append(f"%{item_name}%")
+            if search:
+                conditions.append("(it.name LIKE %s OR it.item_name LIKE %s)")
+                values.extend([f"%{search}%", f"%{search}%"])
+
+            where_clause = " AND ".join(conditions)
+
+            total_count = frappe.db.sql(
+                f"SELECT COUNT(*) FROM `tabItem` it WHERE {where_clause}",
+                values,
+            )[0][0]
+
+            item_list = frappe.db.sql(
+                f"""
+                SELECT it.name, it.item_name, it.description, it.stock_uom, it.has_batch_no
+                FROM `tabItem` it
+                WHERE {where_clause}
+                ORDER BY it.item_name ASC
+                LIMIT %s OFFSET %s
+                """,
+                values + [_page_size, _offset],
+                as_dict=True,
+            )
+        elif name:
             # Try exact match first (for barcode lookups), then fall back to LIKE
             exact_filters = {**filters, 'name': name}
             item_list = frappe.db.get_list("Item", filters=exact_filters, fields=fields,
@@ -2447,11 +2506,13 @@ def get_item_list(name=None, item_name=None, customer=None, search=None,
                 item_list = frappe.db.get_list("Item", filters=filters, fields=fields,
                                              limit_start=_offset,
                                              limit_page_length=_page_size)
+            total_count = len(item_list) if not isinstance(filters.get('name'), list) else frappe.db.count("Item", filters=filters or {})
         elif item_name:
             filters['item_name'] = ["like", f"%{item_name}%"]
             item_list = frappe.db.get_list("Item", filters=filters, fields=fields,
                                          limit_start=_offset,
                                          limit_page_length=_page_size)
+            total_count = frappe.db.count("Item", filters=filters or {})
         elif search:
             # Search across name and item_name
             or_filters = [
@@ -2462,23 +2523,15 @@ def get_item_list(name=None, item_name=None, customer=None, search=None,
                                          fields=fields,
                                          limit_start=_offset,
                                          limit_page_length=_page_size)
+            total_count = frappe.db.sql(
+                "SELECT COUNT(*) FROM `tabItem` WHERE custom_allow_mobile_app = 1 AND disabled = 0 "
+                "AND (name LIKE %s OR item_name LIKE %s)",
+                (f"%{search}%", f"%{search}%"),
+            )[0][0]
         else:
             item_list = frappe.db.get_list("Item", filters=filters, fields=fields,
                                          limit_start=_offset,
                                          limit_page_length=_page_size)
-
-        # Compute total_count for pagination — same filter set, no limit
-        if name and not isinstance(filters.get('name'), list):
-            # Exact-match path matched (1 result) — total_count = 1
-            total_count = len(item_list)
-        elif search:
-            total_count = frappe.db.count("Item", filters=filters or {}) if not search else \
-                frappe.db.sql(
-                    "SELECT COUNT(*) FROM `tabItem` WHERE custom_allow_mobile_app = 1 AND disabled = 0 "
-                    "AND (name LIKE %s OR item_name LIKE %s)",
-                    (f"%{search}%", f"%{search}%")
-                )[0][0]
-        else:
             total_count = frappe.db.count("Item", filters=filters or {})
         
         # Get settings safely
@@ -10411,7 +10464,8 @@ def get_customer_list_v2(name=None, mobile_no=None, territory=None, route=None,
                          user_lat=None, user_lng=None,
                          include_balance=None,
                          page_number=1, page_size=20,
-                         limit_start=None, limit_page_length=None):
+                         limit_start=None, limit_page_length=None,
+                         company=None):
     """
     Enhanced customer list with route/territory, visit status.
 
@@ -10431,6 +10485,11 @@ def get_customer_list_v2(name=None, mobile_no=None, territory=None, route=None,
         page_number: Page number (default: 1)
         page_size: Records per page (default: 20)
         limit_start / limit_page_length: Legacy pagination (overrides page_number/page_size if provided)
+        company: optional — Customer has no native company column, so the
+            filter restricts to customers who have at least one Sales Invoice
+            OR Sales Order in the requested company. Validated against the
+            user's allowed set; defaults to the user's allowed-companies set
+            (multi-company login).
     """
     try:
         # Support both pagination styles
@@ -10443,8 +10502,38 @@ def get_customer_list_v2(name=None, mobile_no=None, territory=None, route=None,
         sales_person = frappe.db.get_value("Sales Person", {"custom_user": frappe.session.user}, "name")
         override_enabled = should_override_sales_team()
 
+        # Multi-company scoping (indirect via SI/SO existence in the company)
+        if company:
+            assert_company_allowed(company)
+        _allowed_companies = _get_user_companies(frappe.session.user) if frappe.session.user != "Administrator" else []
+
         filters = {}
         or_filters = None
+
+        if company or _allowed_companies:
+            target_companies = [company] if company else _allowed_companies
+            _ph = ",".join(["%s"] * len(target_companies))
+            company_customers = frappe.db.sql(
+                f"""
+                SELECT DISTINCT customer FROM (
+                    SELECT customer FROM `tabSales Invoice`
+                    WHERE docstatus IN (0, 1) AND company IN ({_ph})
+                    UNION
+                    SELECT customer FROM `tabSales Order`
+                    WHERE docstatus IN (0, 1) AND company IN ({_ph})
+                ) c
+                """,
+                target_companies + target_companies,
+            )
+            company_customer_names = [r[0] for r in company_customers if r and r[0]]
+            if not company_customer_names:
+                return response("Customer list", {
+                    "customers": [],
+                    "total_count": 0,
+                    "page_number": int(page_number or 1),
+                    "page_size": _page_size,
+                }, True, 200)
+            filters["name"] = ["in", company_customer_names]
 
         if name:
             or_filters = [
