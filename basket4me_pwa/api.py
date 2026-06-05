@@ -4550,8 +4550,22 @@ def get_print_pdf(doctype=None, name=None, print_format=None, letterhead=None):
         if not doctype or not name:
             return response("doctype and name are required", {}, False, 400)
 
+        # Translate logical labels (returned by get_user_details permissions
+        # and default_print_formats maps) to actual Frappe doctypes.
+        # Receipt = Payment Entry; Sales Return = Sales Invoice (is_return=1);
+        # Customer Visit = Comment-based log on Customer (not directly
+        # printable — caller should use Customer doc instead).
+        _input_doctype = doctype
+        _doctype_aliases = {
+            "Receipt": "Payment Entry",
+            "Sales Return": "Sales Invoice",
+            "Customer Visit": "Customer",
+        }
+        if doctype in _doctype_aliases:
+            doctype = _doctype_aliases[doctype]
+
         if not frappe.db.exists(doctype, name):
-            return response(f"{doctype} {name} not found", {}, False, 404)
+            return response(f"{_input_doctype} '{name}' not found", {}, False, 404)
 
         if not print_format:
             print_format = "Standard"
