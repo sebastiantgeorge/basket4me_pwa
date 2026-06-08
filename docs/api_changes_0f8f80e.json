@@ -1,0 +1,164 @@
+{
+  "commit": "0f8f80e",
+  "deployed_to": ["basket4meerp.m.frappe.cloud (pending bench update)", "btlerp.m.frappe.cloud (pending bench update)"],
+  "base_url": "https://<site>/api/method/",
+  "auth": "Authorization: token <api_key>:<api_secret>",
+  "endpoints": [
+    {
+      "method": "POST",
+      "path": "basket4me_pwa.api.create_payment_entry",
+      "summary": "Create a Payment Entry. `invoices` is now OPTIONAL.",
+      "required_fields": ["party", "paid_amount"],
+      "optional_fields": [
+        "invoices",
+        "mode_of_payment",
+        "reference_no",
+        "reference_date",
+        "posting_date",
+        "deductions",
+        "company"
+      ],
+      "behavior": {
+        "invoices_supplied": "Splits into return / non-return invoices and creates one PE per group with allocated references (existing behavior).",
+        "invoices_empty_or_missing": "Creates a single standalone PE (payment_type=Receive, no references) — an on-account / advance receipt the customer can allocate later. party + paid_amount remain required."
+      },
+      "examples": {
+        "minimal_advance_receipt": {
+          "params": {
+            "party": "1008 Bazar Vaduthala",
+            "paid_amount": 500,
+            "mode_of_payment": "Canara Bank",
+            "reference_no": "ADV-2026-001"
+          }
+        },
+        "allocated_to_invoice": {
+          "params": {
+            "party": "1008 Bazar Vaduthala",
+            "paid_amount": 1500,
+            "mode_of_payment": "Cash",
+            "reference_no": "RC-001",
+            "invoices": [
+              { "invoice": "DA-A2526-14485", "amount": 1500 }
+            ]
+          }
+        }
+      },
+      "response_200": {
+        "message": "Payment Entry created as Draft",
+        "data": {
+          "receipt_id": "DART-NNNN/25-26",
+          "docstatus": 0,
+          "status": "Draft",
+          "mode_of_payment": "Canara Bank",
+          "sales_person": "<sp>",
+          "total_amount": 500
+        },
+        "success": true
+      },
+      "error_400": {
+        "message": "Missing required parameters: party",
+        "data": {},
+        "success": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "basket4me_pwa.api.get_item_list",
+      "summary": "List enabled mobile-app items. New optional `custom_company` filter.",
+      "query_params": {
+        "name": "string (exact / LIKE)",
+        "item_name": "string (LIKE)",
+        "customer": "string — sets effective price list lookup",
+        "search": "string (LIKE across name + item_name)",
+        "company": "string — indirect filter: items with stock in warehouses of this company",
+        "custom_company": "string — direct filter on Item.custom_company column",
+        "page_number": "int (default 1)",
+        "page_size": "int (default 20)"
+      },
+      "custom_company_semantics": {
+        "column_exists": "Filter applied: returns only items where Item.custom_company = <value>.",
+        "column_missing": "Filter silently ignored — full list returned. NO 500/417 raised."
+      },
+      "example": "GET /api/method/basket4me_pwa.api.get_item_list?custom_company=BTL&page_number=1&page_size=20",
+      "response_data_shape": {
+        "items": [],
+        "total_count": 0,
+        "page_number": 1,
+        "page_size": 20
+      }
+    },
+    {
+      "method": "GET",
+      "path": "basket4me_pwa.api.get_customer_list_v2",
+      "summary": "Customer list with route/territory/visit status. New optional `custom_company` filter.",
+      "query_params": {
+        "name": "string (LIKE across customer_name + name)",
+        "mobile_no": "string (LIKE)",
+        "territory": "string",
+        "route": "string — prefers Customer.custom_route, falls back to territory",
+        "visit_status": "'visited' | 'not_visited' | omit",
+        "sort_by": "'name' | 'route' | 'distance'",
+        "user_lat": "float — when provided, returns distance_km per customer",
+        "user_lng": "float",
+        "include_balance": "'1' to include outstanding_balance (batched)",
+        "company": "string — indirect: customers with SO/SI in this company",
+        "custom_company": "string — direct filter on Customer.custom_company column",
+        "page_number": "int (default 1)",
+        "page_size": "int (default 20)"
+      },
+      "custom_company_semantics": "Same as get_item_list — applied only if Customer.custom_company column exists; silently ignored otherwise.",
+      "example": "GET /api/method/basket4me_pwa.api.get_customer_list_v2?custom_company=BTL&route=ROUTE-001&page_number=1",
+      "response_data_shape": {
+        "customers": [],
+        "total_count": 0,
+        "page_number": 1,
+        "page_size": 20
+      }
+    },
+    {
+      "method": "GET",
+      "path": "basket4me_pwa.api.get_supplier_list",
+      "summary": "NEW endpoint. Lists Suppliers with pagination + optional custom_company filter.",
+      "query_params": {
+        "name": "string — exact match on Supplier doc name",
+        "search": "string — LIKE across name + supplier_name",
+        "supplier_group": "string — filter by Supplier Group",
+        "custom_company": "string — direct filter on Supplier.custom_company column",
+        "page_number": "int (default 1)",
+        "page_size": "int (default 20)",
+        "limit_start": "int — legacy pagination alias",
+        "limit_page_length": "int — legacy pagination alias"
+      },
+      "custom_company_semantics": "Same as get_item_list / get_customer_list_v2.",
+      "example": "GET /api/method/basket4me_pwa.api.get_supplier_list?custom_company=BTL&page_number=1&page_size=20",
+      "response_data_shape": {
+        "suppliers": [
+          {
+            "name": "string",
+            "supplier_name": "string",
+            "supplier_group": "string",
+            "supplier_type": "string",
+            "country": "string",
+            "default_currency": "string",
+            "mobile_no": "string (if column exists)",
+            "email_id": "string (if column exists)",
+            "tax_id": "string (if column exists)",
+            "custom_company": "string (if column exists)"
+          }
+        ],
+        "total_count": 0,
+        "page_number": 1,
+        "page_size": 20
+      }
+    }
+  ],
+  "deploy_notes": [
+    "Pull commit 0f8f80e on Frappe Cloud bench (no migration needed — code only).",
+    "`bench restart` to load the new code into running gunicorn workers.",
+    "`custom_company` filter is a no-op until a Custom Field named `custom_company` is created on Item / Customer / Supplier via the desk's Customize Form (or add fixtures later if you want it codified)."
+  ],
+  "backward_compat": {
+    "create_payment_entry": "Existing callers passing `invoices` continue to work unchanged. Only behavior diff: callers passing missing/empty `invoices` no longer get a 400 — they get an on-account PE.",
+    "get_item_list / get_customer_list_v2 / get_supplier_list": "Existing callers without `custom_company` see no change."
+  }
+}
