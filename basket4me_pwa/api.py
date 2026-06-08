@@ -5989,6 +5989,20 @@ def create_payment_entry(params=None):
             if not inv.get("invoice_id"):
                 return response("Missing required parameter: 'invoice_id' (or 'invoice' or 'reference_name') in invoices array", {}, False, 400)
 
+        # Validate date fields up-front so MySQL doesn't surface a 1292
+        # ("Incorrect date value") later. getdate accepts YYYY-MM-DD,
+        # YYYY-MM-DD HH:MM:SS, and dd-mm-yyyy.
+        from frappe.utils import getdate
+        for _df in ("posting_date", "reference_date"):
+            if params.get(_df) is not None and params.get(_df) != "":
+                try:
+                    getdate(params.get(_df))
+                except Exception:
+                    return response(
+                        f"Invalid date for '{_df}': '{params.get(_df)}'. Expected YYYY-MM-DD.",
+                        {}, False, 400,
+                    )
+
         # Default posting & reference dates to today when not supplied —
         # bank-transaction PEs (mode_of_payment.type='Bank') require
         # reference_date even if frontend only sends reference_no.
@@ -6703,6 +6717,21 @@ def update_payment_entry(params):
 
         if pe.docstatus != 0:
             return response("Can only update Payment Entry in Draft state", {}, False, 400)
+
+        # ── Validate date fields up-front (avoid MySQL 1292 surfacing) ──
+        # Accepts YYYY-MM-DD, YYYY-MM-DD HH:MM:SS, and dd-mm-yyyy via
+        # frappe.utils.getdate. Invalid strings (e.g. "1234") get rejected
+        # with a clean 400 instead of bubbling up as "Incorrect date value".
+        from frappe.utils import getdate
+        for _df in ("posting_date", "reference_date"):
+            if params.get(_df) is not None and params.get(_df) != "":
+                try:
+                    getdate(params.get(_df))
+                except Exception:
+                    return response(
+                        f"Invalid date for '{_df}': '{params.get(_df)}'. Expected YYYY-MM-DD.",
+                        {}, False, 400,
+                    )
 
         # Update allowed fields
         if params.get("paid_amount") is not None:
