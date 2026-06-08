@@ -2418,7 +2418,8 @@ def get_item_by_barcode(barcode=None):
 @frappe.whitelist(methods="GET")
 def get_item_list(name=None, item_name=None, customer=None, search=None,
                   page_number=1, page_size=20,
-                  limit_start=None, limit_page_length=None, company=None):
+                  limit_start=None, limit_page_length=None, company=None,
+                  custom_company=None):
     """
     List enabled mobile-app items with pagination.
 
@@ -2430,6 +2431,12 @@ def get_item_list(name=None, item_name=None, customer=None, search=None,
         warehouses of the given company. Validated against the user's
         allowed-companies set. When omitted on a multi-company user,
         restricts to items in warehouses of any allowed company.
+
+    custom_company: optional — direct filter on the Item.custom_company
+        column (if the column exists on this site). When the column is
+        absent the filter is silently ignored (no error) and the full
+        list is returned. Pass to filter items tagged with a specific
+        company directly via this Custom Field.
     """
     try:
         # Normalize pagination — page_number/page_size takes precedence unless legacy supplied
@@ -2438,6 +2445,10 @@ def get_item_list(name=None, item_name=None, customer=None, search=None,
             _offset = int(limit_start)
         else:
             _offset = (int(page_number or 1) - 1) * _page_size
+
+        # Resolve `custom_company` filter (only when the column exists; the
+        # docstring promises "show all if no field exists" semantics).
+        _apply_custom_company = bool(custom_company) and frappe.db.has_column("Item", "custom_company")
 
         # Multi-company filter. Item has no native `company` column, so we
         # restrict via the items present in warehouses of the given company
@@ -2451,6 +2462,8 @@ def get_item_list(name=None, item_name=None, customer=None, search=None,
         _company_scoping = bool(company) or bool(_allowed_companies)
 
         filters = {"custom_allow_mobile_app": 1, "disabled": 0}
+        if _apply_custom_company:
+            filters["custom_company"] = custom_company
         fields = ['name', 'item_name', "description", "stock_uom", "has_batch_no"]
 
         if _company_scoping:
@@ -2467,6 +2480,11 @@ def get_item_list(name=None, item_name=None, customer=None, search=None,
                 WHERE w.company IN ({_company_ph})
             )""")
             values = list(target_companies)
+
+            # `custom_company` direct filter (has_column guarded)
+            if _apply_custom_company:
+                conditions.append("it.custom_company = %s")
+                values.append(custom_company)
 
             if name:
                 conditions.append("(it.name LIKE %s OR it.name = %s)")
@@ -5819,25 +5837,24 @@ def create_payment_entry(params=None):
         else:
             params = frappe.parse_json(frappe.request.get_data().decode())
         
-        # Validate required parameters
-        required_params = ["party", "paid_amount", "invoices"]
-        missing_params = []
-        for param in required_params:
-            if param not in params:
-                missing_params.append(param)
-        
+        # Validate required parameters. `invoices` is OPTIONAL — when empty
+        # or omitted, a single unallocated (party-level credit) Payment Entry
+        # is created so the customer can run an advance/on-account payment.
+        required_params = ["party", "paid_amount"]
+        missing_params = [p for p in required_params if p not in params]
         if missing_params:
             return response(f"Missing required parameters: {', '.join(missing_params)}", {}, False, 400)
-        
-        # Parse invoices if it's a JSON string
-        invoices_raw = params.get("invoices", [])
-        if isinstance(invoices_raw, str):
-            invoices_raw = json.loads(invoices_raw)
-        params["invoices"] = invoices_raw
 
-        # Validate invoices parameter
-        if not isinstance(params["invoices"], list) or len(params["invoices"]) == 0:
-            return response("Parameter 'invoices' must be a non-empty list", {}, False, 400)
+        # Parse invoices if it's a JSON string; default to empty list
+        invoices_raw = params.get("invoices") or []
+        if isinstance(invoices_raw, str):
+            try:
+                invoices_raw = json.loads(invoices_raw)
+            except Exception:
+                invoices_raw = []
+        if not isinstance(invoices_raw, list):
+            invoices_raw = []
+        params["invoices"] = invoices_raw
 
         settings = get_basket4me_settings()
 
@@ -6059,6 +6076,37 @@ def create_payment_entry(params=None):
                     "amount": deduction["amount"]
                 })
 
+            payment_entry.flags.ignore_permissions = True
+            payment_entry.insert(ignore_permissions=True)
+
+        # ── Fallback: no invoices supplied → standalone "on-account" PE ──
+        # Allows the customer to record a generic advance / advance receipt
+        # that isn't tied to any specific invoice. The PE is created without
+        # references; Frappe will leave the paid_amount unallocated.
+        if not return_invoices and not non_return_invoices:
+            payment_entry = frappe.new_doc("Payment Entry")
+            payment_entry.party_type = "Customer"
+            payment_entry.party = params["party"]
+            payment_entry.payment_type = "Receive"
+            payment_entry.posting_date = posting_date_val
+            payment_entry.paid_amount = params["paid_amount"]
+            payment_entry.received_amount = params["paid_amount"]
+            payment_entry.reference_no = params.get("reference_no")
+            payment_entry.reference_date = reference_date_val
+            payment_entry.mode_of_payment = mode_of_payment
+            payment_entry.paid_to = paid_to_account
+            payment_entry.paid_from = company.default_receivable_account
+            payment_entry.target_exchange_rate = 1
+            payment_entry.source_exchange_rate = 1
+            payment_entry.custom_sales_person = sales_person
+            payment_entry.cost_center = sales_person_details.cost_center if sales_person_details else None
+            payment_entry.company = sales_person_details.company if sales_person_details else None
+            for deduction in deductions_data:
+                payment_entry.append("deductions", {
+                    "account": sales_person_details.deduction_account,
+                    "cost_center": sales_person_details.cost_center,
+                    "amount": deduction["amount"],
+                })
             payment_entry.flags.ignore_permissions = True
             payment_entry.insert(ignore_permissions=True)
 
@@ -10473,13 +10521,82 @@ def get_customer_visits(customer=None, from_date=None, to_date=None, company=Non
 
 
 @frappe.whitelist(methods="GET")
+def get_supplier_list(name=None, search=None, supplier_group=None,
+                      page_number=1, page_size=20,
+                      limit_start=None, limit_page_length=None,
+                      custom_company=None):
+    """
+    List enabled Suppliers with pagination + optional custom_company filter.
+
+    Args:
+        name: exact match on Supplier doc name (legacy lookups)
+        search: LIKE search across name and supplier_name
+        supplier_group: filter by Supplier Group
+        page_number / page_size: pagination
+        limit_start / limit_page_length: legacy pagination aliases
+        custom_company: filter on Supplier.custom_company when that column
+            exists on this site. When absent (no Custom Field), the filter
+            is silently ignored and the full Supplier list is returned.
+    """
+    try:
+        _page_size = int(limit_page_length or page_size or 20)
+        if limit_start is not None:
+            _offset = int(limit_start)
+        else:
+            _offset = (int(page_number or 1) - 1) * _page_size
+
+        _apply_custom_company = bool(custom_company) and frappe.db.has_column("Supplier", "custom_company")
+
+        filters = {"disabled": 0}
+        if name:
+            filters["name"] = name
+        if supplier_group:
+            filters["supplier_group"] = supplier_group
+        if _apply_custom_company:
+            filters["custom_company"] = custom_company
+
+        or_filters = None
+        if search:
+            or_filters = [
+                ["name", "like", f"%{search}%"],
+                ["supplier_name", "like", f"%{search}%"],
+            ]
+
+        fields = ["name", "supplier_name", "supplier_group", "supplier_type", "country", "default_currency"]
+        for f in ("mobile_no", "email_id", "tax_id", "custom_company"):
+            if frappe.db.has_column("Supplier", f):
+                fields.append(f)
+
+        suppliers = frappe.get_all(
+            "Supplier",
+            filters=filters,
+            or_filters=or_filters,
+            fields=fields,
+            order_by="supplier_name asc",
+            limit_start=_offset,
+            limit_page_length=_page_size,
+        )
+        total_count = frappe.db.count("Supplier", filters=filters)
+
+        return response("Supplier list", {
+            "suppliers": suppliers,
+            "total_count": total_count,
+            "page_number": int(page_number or 1),
+            "page_size": _page_size,
+        }, True, 200)
+    except Exception as e:
+        frappe.log_error(title="get_supplier_list error", message=frappe.get_traceback())
+        return response(str(e), {}, False, 500)
+
+
+@frappe.whitelist(methods="GET")
 def get_customer_list_v2(name=None, mobile_no=None, territory=None, route=None,
                          visit_status=None, sort_by=None,
                          user_lat=None, user_lng=None,
                          include_balance=None,
                          page_number=1, page_size=20,
                          limit_start=None, limit_page_length=None,
-                         company=None):
+                         company=None, custom_company=None):
     """
     Enhanced customer list with route/territory, visit status.
 
@@ -10521,7 +10638,13 @@ def get_customer_list_v2(name=None, mobile_no=None, territory=None, route=None,
             assert_company_allowed(company)
         _allowed_companies = _get_user_companies(frappe.session.user) if frappe.session.user != "Administrator" else []
 
+        # Direct Customer.custom_company filter (has_column guarded — silently
+        # ignored if the column doesn't exist on this site)
+        _apply_custom_company = bool(custom_company) and frappe.db.has_column("Customer", "custom_company")
+
         filters = {}
+        if _apply_custom_company:
+            filters["custom_company"] = custom_company
         or_filters = None
 
         if company or _allowed_companies:
