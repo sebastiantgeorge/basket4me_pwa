@@ -10658,11 +10658,12 @@ def get_customer_list_v2(name=None, mobile_no=None, territory=None, route=None,
         fields = [
             "name", "customer_name", "mobile_no", "territory",
             "default_price_list", "customer_group",
-            "custom_latitude", "custom_longitude",
         ]
 
-        # Add custom fields if they exist
-        for f in ["custom_route", "custom_visit_sequence"]:
+        # Add custom fields if they exist (silently skip on sites where the
+        # fixtures haven't been migrated yet — otherwise frappe.get_all
+        # silently returns 0 rows when a requested field doesn't exist).
+        for f in ["custom_route", "custom_visit_sequence", "custom_latitude", "custom_longitude", "custom_company"]:
             if frappe.db.has_column("Customer", f):
                 fields.append(f)
 
