@@ -2446,75 +2446,28 @@ def get_item_list(name=None, item_name=None, customer=None, search=None,
         else:
             _offset = (int(page_number or 1) - 1) * _page_size
 
-        # Resolve `custom_company` filter (only when the column exists; the
-        # docstring promises "show all if no field exists" semantics).
-        _apply_custom_company = bool(custom_company) and frappe.db.has_column("Item", "custom_company")
-
-        # Multi-company filter. Item has no native `company` column, so we
-        # restrict via the items present in warehouses of the given company
-        # (Bin → Warehouse.company). When no company filter applies, we use
-        # the original Frappe-ORM path for backward compatibility.
+        # Item is a GLOBAL doctype in ERPNext (no native `company` column),
+        # so restricting by Bin presence in a given company was excluding
+        # legitimate items — especially in new companies with no stock yet —
+        # and the desk (which doesn't filter) was showing them. We now treat
+        # `company` AS `custom_company` on this endpoint: if Item.custom_company
+        # exists on this site, filter by it; if it doesn't exist, the filter
+        # is silently ignored and the full list is returned (matches "show
+        # all if no field" semantics).
         if company:
             assert_company_allowed(company)
-        _allowed_companies = _get_user_companies(frappe.session.user) if frappe.session.user != "Administrator" else []
-
-        # Decide if we need the company-scoped path
-        _company_scoping = bool(company) or bool(_allowed_companies)
+        _custom_company_value = custom_company or company
+        _apply_custom_company = (
+            bool(_custom_company_value)
+            and frappe.db.has_column("Item", "custom_company")
+        )
 
         filters = {"custom_allow_mobile_app": 1, "disabled": 0}
         if _apply_custom_company:
-            filters["custom_company"] = custom_company
+            filters["custom_company"] = _custom_company_value
         fields = ['name', 'item_name', "description", "stock_uom", "has_batch_no"]
 
-        if _company_scoping:
-            # Build the WHERE clause + values for a raw-SQL query that
-            # restricts to items in warehouses of the resolved company set.
-            target_companies = [company] if company else _allowed_companies
-            _company_ph = ",".join(["%s"] * len(target_companies))
-
-            conditions = ["it.custom_allow_mobile_app = 1", "it.disabled = 0"]
-            conditions.append(f"""it.name IN (
-                SELECT DISTINCT b.item_code
-                FROM `tabBin` b
-                JOIN `tabWarehouse` w ON w.name = b.warehouse
-                WHERE w.company IN ({_company_ph})
-            )""")
-            values = list(target_companies)
-
-            # `custom_company` direct filter (has_column guarded)
-            if _apply_custom_company:
-                conditions.append("it.custom_company = %s")
-                values.append(custom_company)
-
-            if name:
-                conditions.append("(it.name LIKE %s OR it.name = %s)")
-                values.extend([f"%{name}%", name])
-            if item_name:
-                conditions.append("it.item_name LIKE %s")
-                values.append(f"%{item_name}%")
-            if search:
-                conditions.append("(it.name LIKE %s OR it.item_name LIKE %s)")
-                values.extend([f"%{search}%", f"%{search}%"])
-
-            where_clause = " AND ".join(conditions)
-
-            total_count = frappe.db.sql(
-                f"SELECT COUNT(*) FROM `tabItem` it WHERE {where_clause}",
-                values,
-            )[0][0]
-
-            item_list = frappe.db.sql(
-                f"""
-                SELECT it.name, it.item_name, it.description, it.stock_uom, it.has_batch_no
-                FROM `tabItem` it
-                WHERE {where_clause}
-                ORDER BY it.item_name ASC
-                LIMIT %s OFFSET %s
-                """,
-                values + [_page_size, _offset],
-                as_dict=True,
-            )
-        elif name:
+        if name:
             # Try exact match first (for barcode lookups), then fall back to LIKE
             exact_filters = {**filters, 'name': name}
             item_list = frappe.db.get_list("Item", filters=exact_filters, fields=fields,
@@ -10662,44 +10615,27 @@ def get_customer_list_v2(name=None, mobile_no=None, territory=None, route=None,
         sales_person = frappe.db.get_value("Sales Person", {"custom_user": frappe.session.user}, "name")
         override_enabled = should_override_sales_team()
 
-        # Multi-company scoping (indirect via SI/SO existence in the company)
+        # Customer is a GLOBAL doctype in ERPNext (no native `company` column),
+        # so restricting by SO/SI presence in a given company was excluding
+        # legitimate customers — especially in new companies with no
+        # transactions yet — and the desk (which doesn't filter) was showing
+        # them. We now treat `company` AS `custom_company` on this endpoint:
+        # if Customer.custom_company exists on this site, filter by it; if
+        # it doesn't exist, the filter is silently ignored and the full list
+        # is returned (matches "show all if no field" semantics).
         if company:
             assert_company_allowed(company)
-        _allowed_companies = _get_user_companies(frappe.session.user) if frappe.session.user != "Administrator" else []
-
-        # Direct Customer.custom_company filter (has_column guarded — silently
-        # ignored if the column doesn't exist on this site)
-        _apply_custom_company = bool(custom_company) and frappe.db.has_column("Customer", "custom_company")
+        # Either explicit `custom_company=` OR `company=` (mapped to custom_company).
+        _custom_company_value = custom_company or company
+        _apply_custom_company = (
+            bool(_custom_company_value)
+            and frappe.db.has_column("Customer", "custom_company")
+        )
 
         filters = {}
         if _apply_custom_company:
-            filters["custom_company"] = custom_company
+            filters["custom_company"] = _custom_company_value
         or_filters = None
-
-        if company or _allowed_companies:
-            target_companies = [company] if company else _allowed_companies
-            _ph = ",".join(["%s"] * len(target_companies))
-            company_customers = frappe.db.sql(
-                f"""
-                SELECT DISTINCT customer FROM (
-                    SELECT customer FROM `tabSales Invoice`
-                    WHERE docstatus IN (0, 1) AND company IN ({_ph})
-                    UNION
-                    SELECT customer FROM `tabSales Order`
-                    WHERE docstatus IN (0, 1) AND company IN ({_ph})
-                ) c
-                """,
-                target_companies + target_companies,
-            )
-            company_customer_names = [r[0] for r in company_customers if r and r[0]]
-            if not company_customer_names:
-                return response("Customer list", {
-                    "customers": [],
-                    "total_count": 0,
-                    "page_number": int(page_number or 1),
-                    "page_size": _page_size,
-                }, True, 200)
-            filters["name"] = ["in", company_customer_names]
 
         if name:
             or_filters = [
