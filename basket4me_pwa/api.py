@@ -7406,7 +7406,7 @@ def get_price_list_details(name=None, page_number=1, page_size=20, company=None)
 
 
 @frappe.whitelist(methods="GET")
-def get_price_list_items(price_list=None, item_code=None, item_name=None, name=None, search=None, customer=None, page_number=1, page_size=50):
+def get_price_list_items(price_list=None, item_code=None, item_name=None, name=None, search=None, customer=None, page_number=1, page_size=50, company=None, custom_company=None):
     """
     Get items and their prices for a specific price list with enhanced details.
 
@@ -7416,6 +7416,10 @@ def get_price_list_items(price_list=None, item_code=None, item_name=None, name=N
         item_name: Filter by item name
         search: Search across item_code and item_name
         customer: Customer name (for last customer rate)
+        company: optional — mapped to Item.custom_company (Item is a global
+            doctype with no native company column). Silently ignored when
+            the Item.custom_company column doesn't exist on this site.
+        custom_company: explicit Item.custom_company filter (same semantics).
         page_number / page_size: Pagination
     """
     try:
@@ -7470,6 +7474,15 @@ def get_price_list_items(price_list=None, item_code=None, item_name=None, name=N
         if search:
             item_conditions.append("(it.name LIKE %s OR it.item_name LIKE %s)")
             item_values.extend([f"%{search}%", f"%{search}%"])
+
+        # ── Company filter (`company=` is mapped to `custom_company`; Item is
+        # a global doctype with no native company column). Silently ignored
+        # when Item.custom_company doesn't exist on this site, per the
+        # "show all if no field" rule. ──
+        _custom_company_value = custom_company or company
+        if _custom_company_value and frappe.db.has_column("Item", "custom_company"):
+            item_conditions.append("it.custom_company = %s")
+            item_values.append(_custom_company_value)
 
         # NOTE: custom_allow_mobile_app filter intentionally NOT applied here.
         # Customer requirement: get_price_list_items must return ALL active items
