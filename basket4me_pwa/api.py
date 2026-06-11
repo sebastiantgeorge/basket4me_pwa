@@ -1295,7 +1295,7 @@ def get_invoice_list(name=None, customer=None, status=None, search=None,
         _allowed_companies = _get_user_companies(frappe.session.user) if frappe.session.user != "Administrator" else []
 
         filters = {"is_return": 0}
-        fields = ['name', 'customer', 'customer_name', 'posting_date', 'grand_total', 'outstanding_amount', 'status', 'docstatus', 'creation', 'company']
+        fields = ['name', 'customer', 'customer_name', 'posting_date', 'grand_total', 'outstanding_amount', 'status', 'docstatus', 'creation', 'company', 'cost_center']
 
         if company:
             filters['company'] = company
@@ -1847,6 +1847,7 @@ def get_invoice_detail(name=None):
             "custom_payment_type": doc.custom_payment_type,
             "custom_sales_person": getattr(doc, "custom_sales_person", None),
             "company": doc.company,
+            "cost_center": getattr(doc, "cost_center", None),
             "selling_price_list": doc.selling_price_list,
             "is_return": doc.is_return,
             "return_against": doc.return_against,
@@ -3825,6 +3826,10 @@ def create_sales_invoice(params):
                 )
             return response(f"No Basket4Me Settings row for sales person {sales_person} / company {company or '(any)'}", {}, False, 400)
 
+        # Frontend override for cost_center (set on doc + propagated to items below)
+        if params.get("cost_center"):
+            sales_person_details.cost_center = params.get("cost_center")
+
         # User-selected price list overrides auto-detection
         user_price_list = params.get("price_list") or params.get("selling_price_list")
         if user_price_list and frappe.db.exists("Price List", user_price_list):
@@ -4105,6 +4110,11 @@ def update_sales_invoice(params):
         if not sales_person_details:
             return response(f"No Basket4Me Settings row for sales person {sales_person} / company {company or '(any)'}", {}, False, 400)
 
+        # Frontend override for cost_center
+        if params.get("cost_center"):
+            sales_person_details.cost_center = params.get("cost_center")
+            sales_invoice.cost_center = params.get("cost_center")
+
         effective_price_list = get_effective_price_list(customer=customer, sales_person=sales_person)
 
         # Update header fields
@@ -4285,6 +4295,70 @@ def update_sales_invoice(params):
     except Exception as e:
         frappe.log_error(frappe.get_traceback(), "Sales Invoice Update Error")
         return response(str(e), {}, False, 417)
+
+
+@frappe.whitelist(methods="GET")
+def get_cost_center_list(name=None, company=None, search=None,
+                         page_number=1, page_size=50,
+                         limit_start=None, limit_page_length=None):
+    """List Cost Center docs filtered by company.
+
+    Query params:
+        name: exact match on Cost Center doc name
+        search: LIKE search across name + cost_center_name
+        company: filter by Cost Center.company. Validated against the user's
+            allowed-companies set. When omitted on a multi-company user,
+            restricts to the union of allowed companies.
+        page_number / page_size: pagination
+        limit_start / limit_page_length: legacy pagination aliases
+    """
+    try:
+        _page_size = int(limit_page_length or page_size or 50)
+        if limit_start is not None:
+            _offset = int(limit_start)
+        else:
+            _offset = (int(page_number or 1) - 1) * _page_size
+
+        if company:
+            assert_company_allowed(company)
+        _allowed_companies = _get_user_companies(frappe.session.user) if frappe.session.user != "Administrator" else []
+
+        filters = {"is_group": 0, "disabled": 0}
+        if company:
+            filters["company"] = company
+        elif _allowed_companies:
+            filters["company"] = ["in", _allowed_companies]
+
+        if name:
+            filters["name"] = name
+
+        or_filters = None
+        if search:
+            or_filters = [
+                ["name", "like", f"%{search}%"],
+                ["cost_center_name", "like", f"%{search}%"],
+            ]
+
+        cost_centers = frappe.get_all(
+            "Cost Center",
+            filters=filters,
+            or_filters=or_filters,
+            fields=["name", "cost_center_name", "company", "parent_cost_center"],
+            order_by="cost_center_name asc",
+            limit_start=_offset,
+            limit_page_length=_page_size,
+        )
+        total_count = frappe.db.count("Cost Center", filters=filters)
+
+        return response("Cost Center list", {
+            "cost_centers": cost_centers,
+            "total_count": total_count,
+            "page_number": int(page_number or 1),
+            "page_size": _page_size,
+        }, True, 200)
+    except Exception as e:
+        frappe.log_error(title="get_cost_center_list error", message=frappe.get_traceback())
+        return response(str(e), {}, False, 500)
 
 
 @frappe.whitelist(methods="GET")
@@ -5146,6 +5220,10 @@ def create_sales_invoice_return(params):
                 )
             return response(f"No Basket4Me Settings row for sales person {sales_person} / company {company or '(any)'}", {}, False, 400)
 
+        # Frontend override for cost_center (set on doc + propagated to items below)
+        if params.get("cost_center"):
+            sales_person_details.cost_center = params.get("cost_center")
+
         # Get effective price list
         effective_price_list = get_effective_price_list(customer=customer, sales_person=sales_person)
 
@@ -5492,7 +5570,7 @@ def get_receipt_list(name=None, customer=None, status=None, search=None, from_da
         fields = [
             'name', 'party', 'party_name', 'posting_date', 'paid_amount',
             'mode_of_payment', 'payment_type', 'docstatus', 'status', 'creation',
-            'reference_no', 'reference_date', 'company',
+            'reference_no', 'reference_date', 'company', 'cost_center',
         ]
 
         if name:
@@ -5845,6 +5923,10 @@ def create_payment_entry(params=None):
                     )
                 return response(f"No Basket4Me Settings row for sales person {sales_person} / company {company_name or '(any)'}", {}, False, 400)
 
+            # Frontend override for cost_center
+            if params.get("cost_center"):
+                sales_person_details.cost_center = params.get("cost_center")
+
             company = frappe.get_doc('Company', {"name": sales_person_details.company})
 
             # Enhanced Mode of Payment Selection Logic - Sales Person Based
@@ -6122,7 +6204,7 @@ def get_return_invoice_list(name=None, customer=None, status=None, search=None,
         _allowed_companies = _get_user_companies(frappe.session.user) if frappe.session.user != "Administrator" else []
 
         fields = ['name', 'customer', 'customer_name', 'posting_date', 'grand_total',
-                  'outstanding_amount', 'status', 'docstatus', 'return_against', 'creation', 'company']
+                  'outstanding_amount', 'status', 'docstatus', 'return_against', 'creation', 'company', 'cost_center']
 
         conditions = ["si.is_return = 1"]
         values = []
@@ -6573,6 +6655,8 @@ def receipt_details(receipt_id=None):
             "docstatus": receipt.docstatus,
             "status": receipt.status,
             "creation": str(receipt.creation) if receipt.creation else None,
+            "company": getattr(receipt, "company", None),
+            "cost_center": getattr(receipt, "cost_center", None),
             "invoice_details": response_items,
             "deduction_details": response_deductions,
         }
@@ -6705,6 +6789,9 @@ def update_payment_entry(params):
 
         if params.get("remarks"):
             pe.remarks = params.get("remarks")
+
+        if params.get("cost_center"):
+            pe.cost_center = params.get("cost_center")
 
         # Update invoice references if provided
         if params.get("invoices") and isinstance(params.get("invoices"), list):
@@ -9193,6 +9280,10 @@ def create_sales_order(params):
                 )
             return response(f"No Basket4Me Settings row for sales person {sales_person} / company {company or '(any)'}", {}, False, 400)
 
+        # Frontend override for cost_center (set on doc + propagated to items below)
+        if params.get("cost_center"):
+            sales_person_details.cost_center = params.get("cost_center")
+
         # User-selected price list overrides auto-detection
         user_price_list = params.get("price_list") or params.get("selling_price_list")
         if user_price_list and frappe.db.exists("Price List", user_price_list):
@@ -9430,6 +9521,11 @@ def update_sales_order(params):
         sales_person_details = get_sales_person_details(sales_person, company)
         if not sales_person_details:
             return response(f"No Basket4Me Settings row for sales person {sales_person} / company {company or '(any)'}", {}, False, 400)
+
+        # Frontend override for cost_center
+        if params.get("cost_center"):
+            sales_person_details.cost_center = params.get("cost_center")
+            so.cost_center = params.get("cost_center")
 
         customer = params.get("customer") or so.customer
         effective_price_list = get_effective_price_list(customer=customer, sales_person=sales_person)
@@ -9748,7 +9844,7 @@ def get_sales_order_list(name=None, customer=None, status=None, search=None, fro
             "name", "customer", "customer_name", "transaction_date", "delivery_date",
             "docstatus", "status", "total", "net_total", "grand_total", "currency",
             "per_delivered", "per_billed", "customer_address",
-            "creation", "owner"
+            "creation", "owner", "company", "cost_center"
         ]
 
         # Add optional columns if they exist
@@ -9944,6 +10040,7 @@ def get_sales_order_detail(name=None):
                 "docstatus": so.docstatus,
                 "status": so.status,
                 "company": so.company,
+                "cost_center": getattr(so, "cost_center", None),
                 "currency": so.currency,
                 "selling_price_list": so.selling_price_list,
                 "total": so.total,
@@ -11117,6 +11214,10 @@ def create_delivery_note(params):
         if not sales_person_details:
             return response(f"No Basket4Me Settings found for sales person {sales_person}", {}, False, 400)
 
+        # Frontend override for cost_center (set on doc + propagated to items below)
+        if params.get("cost_center"):
+            sales_person_details.cost_center = params.get("cost_center")
+
         effective_price_list = get_effective_price_list(customer=customer, sales_person=sales_person)
         items = params.get("items")
         delivery_date = params.get("delivery_date") or nowdate()
@@ -11289,6 +11390,11 @@ def update_delivery_note(params):
                 sales_person_details = detail
         if not sales_person_details:
             return response(f"No Basket4Me Settings found for sales person {sales_person}", {}, False, 400)
+
+        # Frontend override for cost_center
+        if params.get("cost_center"):
+            sales_person_details.cost_center = params.get("cost_center")
+            dn.cost_center = params.get("cost_center")
 
         customer = params.get("customer") or dn.customer
         effective_price_list = get_effective_price_list(customer=customer, sales_person=sales_person)
@@ -11519,7 +11625,7 @@ def get_delivery_note_list(name=None, customer=None, status=None, search=None,
             "Delivery Note", filters=filters, or_filters=or_filters,
             fields=["name", "customer", "customer_name", "posting_date", "docstatus",
                      "status", "total", "grand_total", "currency", "per_billed",
-                     "customer_address", "creation", "owner"],
+                     "customer_address", "creation", "owner", "company", "cost_center"],
             order_by="creation desc",
             limit_start=int(limit_start), limit_page_length=int(limit_page_length),
         )
@@ -11686,7 +11792,7 @@ def get_delivery_note_detail(name=None):
         return response("Delivery Note fetched", {
             "name": dn.name, "customer": dn.customer, "customer_name": dn.customer_name,
             "posting_date": str(dn.posting_date), "docstatus": dn.docstatus,
-            "status": dn.status, "company": dn.company, "currency": dn.currency,
+            "status": dn.status, "company": dn.company, "cost_center": getattr(dn, "cost_center", None), "currency": dn.currency,
             "selling_price_list": dn.selling_price_list,
             "total": dn.total, "net_total": dn.net_total,
             "grand_total": dn.grand_total, "per_billed": dn.per_billed,
