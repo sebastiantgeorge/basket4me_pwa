@@ -1648,6 +1648,7 @@ def get_invoice_list(name=None, customer=None, status=None, search=None,
                                 "previous_invoice_outstanding": flt(prev_si[0].get("outstanding_amount") or 0),
                             }
 
+        _attach_cost_center_names(invoice_list or [])
         return response("Invoice List", {
             "invoices": invoice_list or [],
             "total_count": total_count if 'total_count' in dir() else len(invoice_list or []),
@@ -1848,6 +1849,7 @@ def get_invoice_detail(name=None):
             "custom_sales_person": getattr(doc, "custom_sales_person", None),
             "company": doc.company,
             "cost_center": getattr(doc, "cost_center", None),
+            "cost_center_name": _resolve_cost_center_name(getattr(doc, "cost_center", None)),
             "selling_price_list": doc.selling_price_list,
             "is_return": doc.is_return,
             "return_against": doc.return_against,
@@ -4066,6 +4068,8 @@ def create_sales_invoice(params):
             "payment_type": payment_type,
             "sales_person": sales_person,
             "company": sales_invoice.company,
+            "cost_center": getattr(sales_invoice, "cost_center", None),
+            "cost_center_name": _resolve_cost_center_name(getattr(sales_invoice, "cost_center", None)),
             "items": response_items,
             "total": sales_invoice.total,
             "net_total": sales_invoice.net_total,
@@ -4286,6 +4290,9 @@ def update_sales_invoice(params):
             "discount_amount": sales_invoice.discount_amount or 0,
             "grand_total": sales_invoice.grand_total,
             "outstanding_amount": sales_invoice.outstanding_amount,
+            "company": getattr(sales_invoice, "company", None),
+            "cost_center": getattr(sales_invoice, "cost_center", None),
+            "cost_center_name": _resolve_cost_center_name(getattr(sales_invoice, "cost_center", None)),
         }
 
         return response("Sales Invoice updated successfully", data, True, 200)
@@ -4295,6 +4302,52 @@ def update_sales_invoice(params):
     except Exception as e:
         frappe.log_error(frappe.get_traceback(), "Sales Invoice Update Error")
         return response(str(e), {}, False, 417)
+
+
+def _attach_cost_center_names(rows, key="cost_center", out_key="cost_center_name"):
+    """For a list of dicts each carrying a `cost_center` doc-name reference,
+    batch-resolve the display `cost_center_name` and attach to each row under
+    `out_key`. Used to enrich list responses without N+1 queries. Safe on
+    empty / missing-key rows."""
+    if not rows:
+        return
+    unique = []
+    seen = set()
+    for r in rows:
+        v = r.get(key) if isinstance(r, dict) else getattr(r, key, None)
+        if v and v not in seen:
+            seen.add(v)
+            unique.append(v)
+    if not unique:
+        for r in rows:
+            if isinstance(r, dict):
+                r.setdefault(out_key, None)
+        return
+    try:
+        ph = ",".join(["%s"] * len(unique))
+        name_map = {
+            row["name"]: row["cost_center_name"]
+            for row in frappe.db.sql(
+                f"SELECT name, cost_center_name FROM `tabCost Center` WHERE name IN ({ph})",
+                tuple(unique), as_dict=True,
+            )
+        }
+    except Exception:
+        name_map = {}
+    for r in rows:
+        v = r.get(key) if isinstance(r, dict) else getattr(r, key, None)
+        if isinstance(r, dict):
+            r[out_key] = name_map.get(v) if v else None
+
+
+def _resolve_cost_center_name(cc):
+    """Single-doc cost_center → cost_center_name lookup. Returns None safely."""
+    if not cc:
+        return None
+    try:
+        return frappe.db.get_value("Cost Center", cc, "cost_center_name")
+    except Exception:
+        return None
 
 
 @frappe.whitelist(methods="GET")
@@ -5518,6 +5571,8 @@ def create_sales_invoice_return(params):
             "payment_type": payment_type,
             "sales_person": sales_person,
             "company": sales_invoice.company,
+            "cost_center": getattr(sales_invoice, "cost_center", None),
+            "cost_center_name": _resolve_cost_center_name(getattr(sales_invoice, "cost_center", None)),
             "items": response_items,
             "total": sales_invoice.total,
             "net_total": sales_invoice.net_total,
@@ -5525,7 +5580,6 @@ def create_sales_invoice_return(params):
             "grand_total": sales_invoice.grand_total,
             "status": sales_invoice.status,
             "docstatus": sales_invoice.docstatus,
-            "company": sales_invoice.company,
             "effective_price_list": effective_price_list  # Include for reference
         }
 
@@ -5646,6 +5700,7 @@ def get_receipt_list(name=None, customer=None, status=None, search=None, from_da
         )
 
         total_count = frappe.db.count("Payment Entry", filters=filters)
+        _attach_cost_center_names(receipt_list)
 
         return response("Receipt List", {"receipts": receipt_list, "total_count": total_count, "page": page, "page_size": page_size}, True, 200)
     except Exception as exception:
@@ -6332,6 +6387,7 @@ def get_return_invoice_list(name=None, customer=None, status=None, search=None,
                 owner = frappe.db.get_value("Sales Invoice", inv["name"], "owner")
                 inv["created_by"] = (frappe.db.get_value("User", owner, "full_name") or owner) if owner else None
 
+        _attach_cost_center_names(invoice_list or [])
         return response("Return Invoice List", {
             "invoices": invoice_list or [],
             "total_count": total_count,
@@ -6657,6 +6713,7 @@ def receipt_details(receipt_id=None):
             "creation": str(receipt.creation) if receipt.creation else None,
             "company": getattr(receipt, "company", None),
             "cost_center": getattr(receipt, "cost_center", None),
+            "cost_center_name": _resolve_cost_center_name(getattr(receipt, "cost_center", None)),
             "invoice_details": response_items,
             "deduction_details": response_deductions,
         }
@@ -9893,6 +9950,7 @@ def get_sales_order_list(name=None, customer=None, status=None, search=None, fro
                 ]
             )
 
+        _attach_cost_center_names(sales_orders)
         return response(
             "Sales Orders fetched successfully",
             {
@@ -10041,6 +10099,7 @@ def get_sales_order_detail(name=None):
                 "status": so.status,
                 "company": so.company,
                 "cost_center": getattr(so, "cost_center", None),
+                "cost_center_name": _resolve_cost_center_name(getattr(so, "cost_center", None)),
                 "currency": so.currency,
                 "selling_price_list": so.selling_price_list,
                 "total": so.total,
@@ -11355,6 +11414,9 @@ def create_delivery_note(params):
                 "customer": dn.customer, "customer_name": dn.customer_name,
                 "posting_date": str(dn.posting_date),
                 "total": dn.total, "grand_total": dn.grand_total,
+                "company": getattr(dn, "company", None),
+                "cost_center": getattr(dn, "cost_center", None),
+                "cost_center_name": _resolve_cost_center_name(getattr(dn, "cost_center", None)),
                 "items": response_items,
             },
             True, 200,
@@ -11499,6 +11561,9 @@ def update_delivery_note(params):
             {
                 "name": dn.name, "docstatus": dn.docstatus,
                 "customer": dn.customer, "total": dn.total, "grand_total": dn.grand_total,
+                "company": getattr(dn, "company", None),
+                "cost_center": getattr(dn, "cost_center", None),
+                "cost_center_name": _resolve_cost_center_name(getattr(dn, "cost_center", None)),
                 "items": [{"item_code": i.item_code, "item_name": i.item_name, "qty": i.qty, "rate": i.rate, "amount": i.amount} for i in dn.items],
             },
             True, 200,
@@ -11675,6 +11740,7 @@ def get_delivery_note_list(name=None, customer=None, status=None, search=None,
                 ],
             )
 
+        _attach_cost_center_names(dns)
         return response("Delivery Notes fetched", {
             "delivery_notes": dns, "total_count": total_count,
             "total_value": total_value, "total_customers": total_customers,
@@ -11792,7 +11858,7 @@ def get_delivery_note_detail(name=None):
         return response("Delivery Note fetched", {
             "name": dn.name, "customer": dn.customer, "customer_name": dn.customer_name,
             "posting_date": str(dn.posting_date), "docstatus": dn.docstatus,
-            "status": dn.status, "company": dn.company, "cost_center": getattr(dn, "cost_center", None), "currency": dn.currency,
+            "status": dn.status, "company": dn.company, "cost_center": getattr(dn, "cost_center", None), "cost_center_name": _resolve_cost_center_name(getattr(dn, "cost_center", None)), "currency": dn.currency,
             "selling_price_list": dn.selling_price_list,
             "total": dn.total, "net_total": dn.net_total,
             "grand_total": dn.grand_total, "per_billed": dn.per_billed,
