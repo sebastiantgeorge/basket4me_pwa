@@ -269,6 +269,66 @@ def make_checks(token: str):
         "/api/method/basket4me_pwa.api.check_basket4me_settings_status",
     )
 
+    # ── cost_center coverage — list endpoints must EXPOSE the keys (values may
+    # be None for legacy rows; we just verify the key is present so the
+    # frontend can rely on the shape).
+    def _list_has_cc_keys(rows_key: str):
+        def validator(c, b):
+            rows = (b.get("data") or {}).get(rows_key) or []
+            if not rows:
+                return True, "no rows (skipped)"
+            missing = [k for k in ("cost_center", "cost_center_name") if k not in rows[0]]
+            if missing:
+                return False, f"missing keys: {missing}"
+            return True, f"{len(rows)} rows OK"
+        return validator
+
+    add(
+        "get_cost_center_list (new endpoint)",
+        "GET",
+        "/api/method/basket4me_pwa.api.get_cost_center_list",
+        params={"page_size": 5},
+        validator=lambda c, b: (
+            isinstance((b.get("data") or {}).get("cost_centers"), list),
+            "data.cost_centers missing",
+        ),
+    )
+    add(
+        "get_invoice_list — cost_center / cost_center_name keys",
+        "GET",
+        "/api/method/basket4me_pwa.api.get_invoice_list",
+        params={"page_size": 3},
+        validator=lambda c, b: _list_has_cc_keys("invoices")(c, b),
+    )
+    add(
+        "get_sales_order_list — cost_center / cost_center_name keys",
+        "GET",
+        "/api/method/basket4me_pwa.api.get_sales_order_list",
+        params={"page_size": 3},
+        validator=lambda c, b: _list_has_cc_keys("sales_orders")(c, b),
+    )
+    add(
+        "get_receipt_list — cost_center / cost_center_name keys",
+        "GET",
+        "/api/method/basket4me_pwa.api.get_receipt_list",
+        params={"page_size": 3},
+        validator=lambda c, b: _list_has_cc_keys("receipts")(c, b),
+    )
+    add(
+        "get_delivery_note_list — cost_center / cost_center_name keys",
+        "GET",
+        "/api/method/basket4me_pwa.api.get_delivery_note_list",
+        params={"limit_page_length": 3},
+        validator=lambda c, b: _list_has_cc_keys("delivery_notes")(c, b),
+    )
+    add(
+        "get_return_invoice_list — cost_center / cost_center_name keys",
+        "GET",
+        "/api/method/basket4me_pwa.api.get_return_invoice_list",
+        params={"page_size": 3},
+        validator=lambda c, b: _list_has_cc_keys("invoices")(c, b),
+    )
+
     return checks
 
 

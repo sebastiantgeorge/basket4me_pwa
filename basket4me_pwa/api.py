@@ -1381,6 +1381,7 @@ def get_invoice_list(name=None, customer=None, status=None, search=None,
 
             sql = f"""
                 SELECT si.name, si.customer, si.customer_name, si.posting_date, si.grand_total, si.outstanding_amount, si.status, si.docstatus, si.creation,
+                       si.company, si.cost_center,
                        c.mobile_no
                 FROM `tabSales Invoice` si
                 LEFT JOIN `tabCustomer` c ON si.customer = c.name
