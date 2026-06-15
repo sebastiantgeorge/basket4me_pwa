@@ -152,6 +152,16 @@ def make_checks(token: str):
         "GET",
         "/api/method/basket4me_pwa.api.get_customer_route_list",
     )
+    add(
+        "get_customer_route_list (company= filter)",
+        "GET",
+        "/api/method/basket4me_pwa.api.get_customer_route_list",
+        params={"company": "ABC Associate"},
+        validator=lambda c, b: (
+            isinstance((b.get("data") or {}).get("routes"), list),
+            "data.routes missing — filter should silently no-op when no column",
+        ),
+    )
 
     # ── Items / pricing
     add(

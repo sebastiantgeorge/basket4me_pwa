@@ -7034,7 +7034,7 @@ def get_customer_group_list(name=None):
     
 
 @frappe.whitelist(methods="GET")
-def get_customer_route_list(name=None, route_code=None, today_only=None, company=None):
+def get_customer_route_list(name=None, route_code=None, today_only=None, company=None, custom_company=None):
     """
     Get list of Customer Routes.
 
@@ -7042,14 +7042,26 @@ def get_customer_route_list(name=None, route_code=None, today_only=None, company
         name: Search by route code or name
         route_code: Filter by exact route code
         today_only: If "1", return only routes scheduled for today
-        company: optional — when Customer Route has a company column, scope to
-                 that company (or to the user's allowed-companies set if omitted)
+        company: optional — mapped to Customer Route's custom_company (or
+            native company) column. Silently ignored when no such column
+            exists on this site (same "show all if no field" rule used by
+            get_item_list / get_customer_list_v2 / get_supplier_list).
+        custom_company: explicit Customer Route.custom_company filter.
     """
     try:
-        # Multi-company scoping (only if Customer Route has a `company` column)
+        # Look up which company column exists (if any). Custom Field
+        # `custom_company` takes precedence over a native `company` column.
+        _route_has_custom_company = frappe.db.has_column("Customer Route", "custom_company")
         _route_has_company = frappe.db.has_column("Customer Route", "company")
-        if company:
-            assert_company_allowed(company)
+        _company_col = "custom_company" if _route_has_custom_company else ("company" if _route_has_company else None)
+
+        # Resolve the company filter value. Only validate against user's
+        # allowed set when we're actually going to apply the filter (so
+        # invalid-company params on doctypes with no column don't 500).
+        _company_value = custom_company or company
+        _apply_company_filter = bool(_company_value and _company_col)
+        if _apply_company_filter:
+            assert_company_allowed(_company_value)
         _allowed_companies = _get_user_companies(frappe.session.user) if frappe.session.user != "Administrator" else []
 
         filters = {}
@@ -7058,11 +7070,12 @@ def get_customer_route_list(name=None, route_code=None, today_only=None, company
         if route_code:
             filters["route_code"] = route_code
 
-        if _route_has_company:
-            if company:
-                filters["company"] = company
-            elif _allowed_companies:
-                filters["company"] = ["in", _allowed_companies]
+        if _apply_company_filter:
+            filters[_company_col] = _company_value
+        elif _company_col and _allowed_companies:
+            # No explicit company → scope to user's allowed companies (only
+            # when the doctype actually has the column).
+            filters[_company_col] = ["in", _allowed_companies]
 
         if name:
             or_filters = [
@@ -7075,8 +7088,8 @@ def get_customer_route_list(name=None, route_code=None, today_only=None, company
             "monday", "tuesday", "wednesday", "thursday",
             "friday", "saturday", "sunday",
         ]
-        if _route_has_company:
-            _route_fields.append("company")
+        if _company_col:
+            _route_fields.append(_company_col)
 
         routes = frappe.get_all(
             "Customer Route",
